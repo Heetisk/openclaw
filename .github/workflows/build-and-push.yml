@@ -31,7 +31,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-        - name: Build and push image
+      - name: Build and push image
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -42,4 +42,3 @@ jobs:
           platforms: linux/amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
