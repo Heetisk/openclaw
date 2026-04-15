@@ -31,14 +31,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push image
+        - name: Build and push image
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
           tags: |
-            ghcr.io/Heetisk/openclaw:latest
-            ghcr.io/Heetisk/openclaw:${{ github.sha }}
+            ghcr.io/heetisk/openclaw:latest
+            ghcr.io/heetisk/openclaw:${{ github.sha }}
           platforms: linux/amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
