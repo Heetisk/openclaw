@@ -3,14 +3,14 @@ services:
     name: openclaw
     runtime: image
     image:
-      url: ghcr.io/<your-repo>/openclaw:latest
-    plan: starter
+      url: ghcr.io/Heetisk/openclaw:latest
+    plan: free
     startCommand: node openclaw.mjs gateway --allow-unconfigured --bind lan --port $PORT
     healthCheckPath: /healthz
     envVars:
       - key: OPENCLAW_STATE_DIR
-        value: /data/.openclaw
+        value: /tmp/.openclaw
       - key: OPENCLAW_WORKSPACE_DIR
-        value: /data/workspace
+        value: /tmp/workspace
       - key: OPENCLAW_GATEWAY_TOKEN
         generateValue: true
