@@ -3,7 +3,8 @@ services:
     name: openclaw
     runtime: image
     image:
-      url: ghcr.io/Heetisk/openclaw:latest
+      url: ghcr.io/heetisk/openclaw:latest
+
     plan: free
     startCommand: node openclaw.mjs gateway --allow-unconfigured --bind lan --port $PORT
     healthCheckPath: /healthz
