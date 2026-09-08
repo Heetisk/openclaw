@@ -239,7 +239,6 @@ type ChatPayload = {
 };
 
 type AgentWaitResult = {
-  runId?: string;
   status?: string;
   error?: string;
   stopReason?: string;
@@ -328,7 +327,7 @@ function waitForChatResult(params: {
     let settled = false;
     let emptyFinalWaitStarted = false;
     let emptyFinalFallbackTimer: number | undefined;
-    let adoptedRunId: string | undefined;
+    let acceptingAnyRunId = false;
     const onAbort = () => {
       settleReject(new DOMException("OpenClaw tool call aborted", "AbortError"));
     };
@@ -372,20 +371,13 @@ function waitForChatResult(params: {
           if (result?.status === "timeout") {
             return;
           }
-          // pending (queued turn) is non-terminal — keep waiting for the
-          // adopted run's chat events rather than resolving empty.
+          // pending (queued turn) is non-terminal — the gateway's waitForTurn
+          // returns the same runId, but the queued follow-up is admitted with a
+          // fresh random runId that chat events will carry. We cannot learn
+          // that follow-up's identity from the wait response, so accept any
+          // subsequent chat event instead of resolving empty.
           if (result?.status === "pending") {
-            if (result?.runId && result.runId !== params.runId) {
-              adoptedRunId = result.runId;
-            }
-            return;
-          }
-          // The gateway assigned a new runId for the adopted follow-up.
-          // Listen for its chat events instead of resolving empty.
-          if (result?.runId && result.runId !== params.runId) {
-            adoptedRunId = result.runId;
-            // Keep waiting — chat events for the adopted run will
-            // be accepted via matchesActiveRun below.
+            acceptingAnyRunId = true;
             return;
           }
           emptyFinalFallbackTimer = window.setTimeout(() => {
@@ -400,7 +392,9 @@ function waitForChatResult(params: {
       if (payloadRunId === params.runId) {
         return true;
       }
-      if (adoptedRunId !== undefined && payloadRunId === adoptedRunId) {
+      // After a pending queued turn, the follow-up run gets a new random runId
+      // that we cannot predict from the wait response. Accept any valid runId.
+      if (acceptingAnyRunId && payloadRunId.length > 0) {
         return true;
       }
       return false;
@@ -420,8 +414,9 @@ function waitForChatResult(params: {
           settleResolve(finalText);
           return;
         }
-        // Adopted run delivered empty final — start the grace timer.
-        if (adoptedRunId !== undefined) {
+        // A different run (e.g. queued follow-up) delivered empty final —
+        // start the grace timer without re-querying the wait endpoint.
+        if (acceptingAnyRunId) {
           emptyFinalFallbackTimer = window.setTimeout(() => {
             settleResolve("OpenClaw finished with no text.");
           }, EMPTY_FINAL_FALLBACK_GRACE_MS);

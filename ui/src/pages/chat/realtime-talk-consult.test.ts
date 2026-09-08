@@ -846,7 +846,8 @@ describe("RealtimeTalkSession consult handoff", () => {
           };
         }
         if (method === "agent.wait") {
-          return { runId: "run-2", status: "pending" };
+          // Production returns the same runId for pending queued turns.
+          return { runId: "run-1", status: "pending" };
         }
         throw new Error(`unexpected request: ${method}`);
       });
@@ -869,11 +870,11 @@ describe("RealtimeTalkSession consult handoff", () => {
         submit,
       });
 
-      // agent.wait resolves with pending — adoptedRunId is set to run-2
+      // agent.wait resolves with pending — acceptingAnyRunId is set
       await vi.advanceTimersByTimeAsync(1);
       expect(submit).not.toHaveBeenCalled();
 
-      // Adopted run delivers text — should submit
+      // Queued follow-up (different runId) delivers text — should submit
       window.setTimeout(() => {
         listener?.({
           event: "chat",
@@ -900,7 +901,7 @@ describe("RealtimeTalkSession consult handoff", () => {
     }
   }, 15_000);
 
-  it("captures adopted-run final reply with a different runId", async () => {
+  it("captures queued follow-up final reply with a different runId", async () => {
     vi.useFakeTimers();
     try {
       let listener: ((event: { event: string; payload?: unknown }) => void) | undefined;
@@ -924,7 +925,8 @@ describe("RealtimeTalkSession consult handoff", () => {
           };
         }
         if (method === "agent.wait") {
-          return { runId: "run-2", status: "pending" };
+          // Production returns the same runId for pending queued turns.
+          return { runId: "run-1", status: "pending" };
         }
         throw new Error(`unexpected request: ${method}`);
       });
@@ -1000,7 +1002,8 @@ describe("RealtimeTalkSession consult handoff", () => {
           };
         }
         if (method === "agent.wait") {
-          return { runId: "run-2", status: "pending" };
+          // Production returns the same runId for pending queued turns.
+          return { runId: "run-1", status: "pending" };
         }
         throw new Error(`unexpected request: ${method}`);
       });
@@ -1026,7 +1029,7 @@ describe("RealtimeTalkSession consult handoff", () => {
       await vi.advanceTimersByTimeAsync(1);
       expect(submit).not.toHaveBeenCalled();
 
-      // Adopted run delivers empty final — should fall back to no-text
+      // Queued follow-up delivers empty final — should fall back to no-text
       window.setTimeout(() => {
         listener?.({
           event: "chat",
