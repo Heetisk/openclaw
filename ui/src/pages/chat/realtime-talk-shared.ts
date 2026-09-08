@@ -380,7 +380,11 @@ function waitForChatResult(params: {
           if (result?.status === "pending") {
             if (result.followupRunId) {
               acceptedFollowupRunId = result.followupRunId;
+              return;
             }
+            // The follow-up ID may not be allocated yet — observe the queue
+            // entry so we can capture it when admission completes.
+            observePendingFollowupRunId();
             return;
           }
           emptyFinalFallbackTimer = window.setTimeout(() => {
@@ -390,6 +394,54 @@ function waitForChatResult(params: {
         .catch((error: unknown) => {
           settleReject(error instanceof Error ? error : new Error(String(error)));
         });
+    };
+    const observePendingFollowupRunId = () => {
+      // The follow-up run ID is allocated after admitFollowupTurn runs. If the
+      // first agent.wait response did not include it, poll again to observe it.
+      // Use a short interval and a maximum number of retries to avoid excessive
+      // polling while giving the gateway enough time to allocate the ID.
+      let retry = 0;
+      const maxRetries = 10;
+      const intervalMs = 2000;
+      const poll = () => {
+        if (settled || acceptedFollowupRunId) {
+          return;
+        }
+        if (retry >= maxRetries) {
+          return;
+        }
+        retry++;
+        void params.client
+          .request<AgentWaitResult>("agent.wait", {
+            runId: params.runId,
+            timeoutMs: intervalMs,
+          })
+          .then((result) => {
+            if (settled || acceptedFollowupRunId) {
+              return;
+            }
+            const waitError = getTerminalAgentWaitError(result);
+            if (waitError) {
+              settleReject(waitError);
+              return;
+            }
+            if (result?.status === "pending" && result.followupRunId) {
+              acceptedFollowupRunId = result.followupRunId;
+              return;
+            }
+            if (result?.status === "pending") {
+              poll();
+            }
+          })
+          .catch(() => {
+            // Non-terminal — retry unless we've hit the limit.
+            if (acceptedFollowupRunId) {
+              return;
+            }
+            poll();
+          });
+      };
+      window.setTimeout(poll, intervalMs);
     };
     const matchesActiveRun = (payloadRunId: string) => {
       if (payloadRunId === params.runId) {

@@ -901,6 +901,96 @@ describe("RealtimeTalkSession consult handoff", () => {
     }
   }, 15_000);
 
+  it("observes delayed follow-up allocation after first pending response", async () => {
+    vi.useFakeTimers();
+    try {
+      let listener: ((event: { event: string; payload?: unknown }) => void) | undefined;
+      let waitCallCount = 0;
+      const request = vi.fn(async (method: string) => {
+        if (method === "talk.client.toolCall") {
+          window.setTimeout(() => {
+            listener?.({
+              event: "chat",
+              payload: {
+                runId: "run-1",
+                state: "final",
+                message: { text: "" },
+              },
+            });
+          }, 0);
+          return {
+            runId: "run-1",
+            idempotencyKey: "run-1",
+            agentId: "main",
+            agentSessionKey: "agent:main:main",
+          };
+        }
+        if (method === "agent.wait") {
+          waitCallCount++;
+          // First poll: pending without followupRunId (admission has not happened yet).
+          if (waitCallCount === 1) {
+            return { runId: "run-1", status: "pending" };
+          }
+          // Subsequent poll: follow-up ID has been allocated.
+          return { runId: "run-1", status: "pending", followupRunId: "run-delayed" };
+        }
+        throw new Error(`unexpected request: ${method}`);
+      });
+      const addEventListener = vi.fn((callback: typeof listener) => {
+        listener = callback;
+        return () => {
+          listener = undefined;
+        };
+      });
+      const submit = vi.fn();
+
+      const consult = submitRealtimeTalkConsult({
+        ctx: {
+          client: { request, addEventListener },
+          sessionKey: "agent:main:main",
+          callbacks: {},
+        } as never,
+        callId: "call-1",
+        args: { question: "Check status" },
+        submit,
+      });
+
+      // agent.wait returns pending without followupRunId — UI should re-poll.
+      await vi.advanceTimersByTimeAsync(1);
+      expect(submit).not.toHaveBeenCalled();
+      expect(waitCallCount).toBe(1);
+
+      // After re-polling, the follow-up ID is observed.
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(waitCallCount).toBe(2);
+
+      // Queued follow-up (delayed followupRunId) delivers text — should submit.
+      window.setTimeout(() => {
+        listener?.({
+          event: "chat",
+          payload: {
+            runId: "run-delayed",
+            state: "final",
+            message: {
+              role: "assistant",
+              provider: "openclaw",
+              model: "delivery-mirror",
+              text: "Delayed queued answer.",
+            },
+          },
+        });
+      }, 0);
+      await vi.advanceTimersByTimeAsync(1);
+      await consult;
+
+      expect(submit).toHaveBeenCalledWith("call-1", {
+        result: "Delayed queued answer.",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
+
   it("captures queued follow-up final reply with a different runId", async () => {
     vi.useFakeTimers();
     try {
