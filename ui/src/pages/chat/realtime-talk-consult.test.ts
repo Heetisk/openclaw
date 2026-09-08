@@ -821,4 +821,233 @@ describe("RealtimeTalkSession consult handoff", () => {
       expect.stringContaining('Status: "Got it. I steered the active run."'),
     );
   });
+
+  it("does not resolve empty-final fallback when agent.wait returns pending", async () => {
+    vi.useFakeTimers();
+    try {
+      let listener: ((event: { event: string; payload?: unknown }) => void) | undefined;
+      const request = vi.fn(async (method: string) => {
+        if (method === "talk.client.toolCall") {
+          window.setTimeout(() => {
+            listener?.({
+              event: "chat",
+              payload: {
+                runId: "run-1",
+                state: "final",
+                message: { text: "" },
+              },
+            });
+          }, 0);
+          return {
+            runId: "run-1",
+            idempotencyKey: "run-1",
+            agentId: "main",
+            agentSessionKey: "agent:main:main",
+          };
+        }
+        if (method === "agent.wait") {
+          return { runId: "run-2", status: "pending" };
+        }
+        throw new Error(`unexpected request: ${method}`);
+      });
+      const addEventListener = vi.fn((callback: typeof listener) => {
+        listener = callback;
+        return () => {
+          listener = undefined;
+        };
+      });
+      const submit = vi.fn();
+
+      const consult = submitRealtimeTalkConsult({
+        ctx: {
+          client: { request, addEventListener },
+          sessionKey: "agent:main:main",
+          callbacks: {},
+        } as never,
+        callId: "call-1",
+        args: { question: "Check status" },
+        submit,
+      });
+
+      // agent.wait resolves with pending — adoptedRunId is set to run-2
+      await vi.advanceTimersByTimeAsync(0);
+      expect(submit).not.toHaveBeenCalled();
+
+      // Adopted run delivers text — should submit
+      window.setTimeout(() => {
+        listener?.({
+          event: "chat",
+          payload: {
+            runId: "run-2",
+            state: "final",
+            message: {
+              role: "assistant",
+              provider: "openclaw",
+              model: "delivery-mirror",
+              text: "Queued answer.",
+            },
+          },
+        });
+      }, 0);
+      await vi.advanceTimersByTimeAsync(0);
+      await consult;
+
+      expect(submit).toHaveBeenCalledWith("call-1", {
+        result: "Queued answer.",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
+
+  it("captures adopted-run final reply with a different runId", async () => {
+    vi.useFakeTimers();
+    try {
+      let listener: ((event: { event: string; payload?: unknown }) => void) | undefined;
+      const request = vi.fn(async (method: string) => {
+        if (method === "talk.client.toolCall") {
+          window.setTimeout(() => {
+            listener?.({
+              event: "chat",
+              payload: {
+                runId: "run-1",
+                state: "final",
+                message: { text: "" },
+              },
+            });
+          }, 0);
+          return {
+            runId: "run-1",
+            idempotencyKey: "run-1",
+            agentId: "main",
+            agentSessionKey: "agent:main:main",
+          };
+        }
+        if (method === "agent.wait") {
+          return { runId: "run-2", status: "pending" };
+        }
+        throw new Error(`unexpected request: ${method}`);
+      });
+      const addEventListener = vi.fn((callback: typeof listener) => {
+        listener = callback;
+        return () => {
+          listener = undefined;
+        };
+      });
+      const submit = vi.fn();
+
+      const consult = submitRealtimeTalkConsult({
+        ctx: {
+          client: { request, addEventListener },
+          sessionKey: "agent:main:main",
+          callbacks: {},
+        } as never,
+        callId: "call-1",
+        args: { question: "Check status" },
+        submit,
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(submit).not.toHaveBeenCalled();
+
+      window.setTimeout(() => {
+        listener?.({
+          event: "chat",
+          payload: {
+            runId: "run-2",
+            state: "final",
+            message: {
+              role: "assistant",
+              provider: "openclaw",
+              model: "delivery-mirror",
+              text: "Adopted run reply.",
+            },
+          },
+        });
+      }, 0);
+      await vi.advanceTimersByTimeAsync(0);
+      await consult;
+
+      expect(submit).toHaveBeenCalledWith("call-1", {
+        result: "Adopted run reply.",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
+
+  it("falls back to no-text when adopted run delivers empty final", async () => {
+    vi.useFakeTimers();
+    try {
+      let listener: ((event: { event: string; payload?: unknown }) => void) | undefined;
+      const request = vi.fn(async (method: string) => {
+        if (method === "talk.client.toolCall") {
+          window.setTimeout(() => {
+            listener?.({
+              event: "chat",
+              payload: {
+                runId: "run-1",
+                state: "final",
+                message: { text: "" },
+              },
+            });
+          }, 0);
+          return {
+            runId: "run-1",
+            idempotencyKey: "run-1",
+            agentId: "main",
+            agentSessionKey: "agent:main:main",
+          };
+        }
+        if (method === "agent.wait") {
+          return { runId: "run-2", status: "pending" };
+        }
+        throw new Error(`unexpected request: ${method}`);
+      });
+      const addEventListener = vi.fn((callback: typeof listener) => {
+        listener = callback;
+        return () => {
+          listener = undefined;
+        };
+      });
+      const submit = vi.fn();
+
+      const consult = submitRealtimeTalkConsult({
+        ctx: {
+          client: { request, addEventListener },
+          sessionKey: "agent:main:main",
+          callbacks: {},
+        } as never,
+        callId: "call-1",
+        args: { question: "Check status" },
+        submit,
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(submit).not.toHaveBeenCalled();
+
+      // Adopted run delivers empty final — should fall back to no-text
+      window.setTimeout(() => {
+        listener?.({
+          event: "chat",
+          payload: {
+            runId: "run-2",
+            state: "final",
+            message: { text: "" },
+          },
+        });
+      }, 0);
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Grace period timer fires
+      await vi.advanceTimersByTimeAsync(500);
+      await consult;
+
+      expect(submit).toHaveBeenCalledWith("call-1", {
+        result: "OpenClaw finished with no text.",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
 });

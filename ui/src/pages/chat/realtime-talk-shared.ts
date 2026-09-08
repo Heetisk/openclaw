@@ -282,6 +282,10 @@ function getTerminalAgentWaitError(result: AgentWaitResult | undefined): Error |
   if (result.status === "error") {
     return new Error(message || "OpenClaw tool call failed");
   }
+  // pending means the turn is queued/deferred — not terminal, so keep waiting.
+  if (result.status === "pending") {
+    return undefined;
+  }
   if (result.status !== "timeout" || result.pendingError) {
     return undefined;
   }
@@ -323,6 +327,8 @@ function waitForChatResult(params: {
     let settled = false;
     let emptyFinalWaitStarted = false;
     let emptyFinalFallbackTimer: number | undefined;
+    let adoptedRunId: string | undefined;
+    let pendingWaitReject: ((error: Error) => void) | undefined;
     const onAbort = () => {
       settleReject(new DOMException("OpenClaw tool call aborted", "AbortError"));
     };
@@ -355,6 +361,7 @@ function waitForChatResult(params: {
           timeoutMs: params.timeoutMs,
         })
         .then((result) => {
+          pendingWaitReject = undefined;
           if (settled) {
             return;
           }
@@ -366,6 +373,22 @@ function waitForChatResult(params: {
           if (result?.status === "timeout") {
             return;
           }
+          // pending (queued turn) is non-terminal — keep waiting for the
+          // adopted run's chat events rather than resolving empty.
+          if (result?.status === "pending") {
+            if (result?.runId && result.runId !== params.runId) {
+              adoptedRunId = result.runId;
+            }
+            return;
+          }
+          // The gateway assigned a new runId for the adopted follow-up.
+          // Listen for its chat events instead of resolving empty.
+          if (result?.runId && result.runId !== params.runId) {
+            adoptedRunId = result.runId;
+            // Keep waiting — chat events for the adopted run will
+            // be accepted via matchesActiveRun below.
+            return;
+          }
           emptyFinalFallbackTimer = window.setTimeout(() => {
             settleResolve("OpenClaw finished with no text.");
           }, EMPTY_FINAL_FALLBACK_GRACE_MS);
@@ -374,12 +397,21 @@ function waitForChatResult(params: {
           settleReject(error instanceof Error ? error : new Error(String(error)));
         });
     };
+    const matchesActiveRun = (payloadRunId: string) => {
+      if (payloadRunId === params.runId) {
+        return true;
+      }
+      if (adoptedRunId !== undefined && payloadRunId === adoptedRunId) {
+        return true;
+      }
+      return false;
+    };
     unsubscribe = params.client.addEventListener((evt: GatewayEventFrame) => {
       if (evt.event !== "chat") {
         return;
       }
       const payload = evt.payload as ChatPayload | undefined;
-      if (!payload || payload.runId !== params.runId) {
+      if (!payload || !matchesActiveRun(payload.runId ?? "")) {
         return;
       }
       emitRealtimeTalkAgentProgress(params.emitTalkEvent, payload);
@@ -387,6 +419,13 @@ function waitForChatResult(params: {
         const finalText = extractTextFromMessage(payload.message);
         if (finalText) {
           settleResolve(finalText);
+          return;
+        }
+        // Adopted run delivered empty final — start the grace timer.
+        if (adoptedRunId !== undefined) {
+          emptyFinalFallbackTimer = window.setTimeout(() => {
+            settleResolve("OpenClaw finished with no text.");
+          }, EMPTY_FINAL_FALLBACK_GRACE_MS);
           return;
         }
         waitForEmptyFinalFallback();
