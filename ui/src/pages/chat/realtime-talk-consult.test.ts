@@ -846,8 +846,8 @@ describe("RealtimeTalkSession consult handoff", () => {
           };
         }
         if (method === "agent.wait") {
-          // Production returns the same runId for pending queued turns.
-          return { runId: "run-1", status: "pending" };
+          // Production returns the same runId and the followupRunId for pending queued turns.
+          return { runId: "run-1", status: "pending", followupRunId: "run-2" };
         }
         throw new Error(`unexpected request: ${method}`);
       });
@@ -870,11 +870,11 @@ describe("RealtimeTalkSession consult handoff", () => {
         submit,
       });
 
-      // agent.wait resolves with pending — acceptingAnyRunId is set
+      // agent.wait resolves with pending — acceptedFollowupRunId is set
       await vi.advanceTimersByTimeAsync(1);
       expect(submit).not.toHaveBeenCalled();
 
-      // Queued follow-up (different runId) delivers text — should submit
+      // Queued follow-up (followupRunId) delivers text — should submit
       window.setTimeout(() => {
         listener?.({
           event: "chat",
@@ -925,8 +925,8 @@ describe("RealtimeTalkSession consult handoff", () => {
           };
         }
         if (method === "agent.wait") {
-          // Production returns the same runId for pending queued turns.
-          return { runId: "run-1", status: "pending" };
+          // Production returns the same runId and the followupRunId for pending queued turns.
+          return { runId: "run-1", status: "pending", followupRunId: "run-2" };
         }
         throw new Error(`unexpected request: ${method}`);
       });
@@ -1002,8 +1002,8 @@ describe("RealtimeTalkSession consult handoff", () => {
           };
         }
         if (method === "agent.wait") {
-          // Production returns the same runId for pending queued turns.
-          return { runId: "run-1", status: "pending" };
+          // Production returns the same runId and the followupRunId for pending queued turns.
+          return { runId: "run-1", status: "pending", followupRunId: "run-2" };
         }
         throw new Error(`unexpected request: ${method}`);
       });
@@ -1048,6 +1048,98 @@ describe("RealtimeTalkSession consult handoff", () => {
 
       expect(submit).toHaveBeenCalledWith("call-1", {
         result: "OpenClaw finished with no text.",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
+
+  it("rejects chat events with runId unrelated to the queued follow-up", async () => {
+    vi.useFakeTimers();
+    try {
+      let listener: ((event: { event: string; payload?: unknown }) => void) | undefined;
+      const request = vi.fn(async (method: string) => {
+        if (method === "talk.client.toolCall") {
+          window.setTimeout(() => {
+            listener?.({
+              event: "chat",
+              payload: {
+                runId: "run-1",
+                state: "final",
+                message: { text: "" },
+              },
+            });
+          }, 0);
+          return {
+            runId: "run-1",
+            idempotencyKey: "run-1",
+            agentId: "main",
+            agentSessionKey: "agent:main:main",
+          };
+        }
+        if (method === "agent.wait") {
+          return { runId: "run-1", status: "pending", followupRunId: "run-2" };
+        }
+        throw new Error(`unexpected request: ${method}`);
+      });
+      const addEventListener = vi.fn((callback: typeof listener) => {
+        listener = callback;
+        return () => {
+          listener = undefined;
+        };
+      });
+      const submit = vi.fn();
+
+      const consultPromise = submitRealtimeTalkConsult({
+        ctx: {
+          client: { request, addEventListener },
+          sessionKey: "agent:main:main",
+          callbacks: {},
+        } as never,
+        callId: "call-1",
+        args: { question: "Check status" },
+        submit,
+      });
+
+      // agent.wait resolves with pending and followupRunId
+      await vi.advanceTimersByTimeAsync(1);
+      expect(submit).not.toHaveBeenCalled();
+
+      // An unrelated runId should be ignored — no resolution
+      window.setTimeout(() => {
+        listener?.({
+          event: "chat",
+          payload: {
+            runId: "unrelated-run-id",
+            state: "final",
+            message: { text: "Should be ignored." },
+          },
+        });
+      }, 0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(submit).not.toHaveBeenCalled();
+
+      // The legitimate follow-up runId still resolves correctly
+      window.setTimeout(() => {
+        listener?.({
+          event: "chat",
+          payload: {
+            runId: "run-2",
+            state: "final",
+            message: {
+              role: "assistant",
+              provider: "openclaw",
+              model: "delivery-mirror",
+              text: "Follow-up answer.",
+            },
+          },
+        });
+      }, 0);
+      await vi.advanceTimersByTimeAsync(1);
+      await consultPromise;
+
+      expect(submit).toHaveBeenCalledWith("call-1", {
+        result: "Follow-up answer.",
       });
     } finally {
       vi.useRealTimers();

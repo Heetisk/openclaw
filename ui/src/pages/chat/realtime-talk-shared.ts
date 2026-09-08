@@ -249,6 +249,8 @@ type AgentWaitResult = {
   aborted?: boolean;
   livenessState?: string;
   yielded?: boolean;
+  /** RunId of the follow-up turn admitted from this queue, for secure client-side correlation. */
+  followupRunId?: string;
 };
 
 const EMPTY_FINAL_FALLBACK_GRACE_MS = 500;
@@ -327,7 +329,7 @@ function waitForChatResult(params: {
     let settled = false;
     let emptyFinalWaitStarted = false;
     let emptyFinalFallbackTimer: number | undefined;
-    let acceptingAnyRunId = false;
+    let acceptedFollowupRunId: string | undefined;
     const onAbort = () => {
       settleReject(new DOMException("OpenClaw tool call aborted", "AbortError"));
     };
@@ -372,12 +374,13 @@ function waitForChatResult(params: {
             return;
           }
           // pending (queued turn) is non-terminal — the gateway's waitForTurn
-          // returns the same runId, but the queued follow-up is admitted with a
-          // fresh random runId that chat events will carry. We cannot learn
-          // that follow-up's identity from the wait response, so accept any
-          // subsequent chat event instead of resolving empty.
+          // returns the same runId and, when a follow-up has been admitted,
+          // includes the follow-up's runId in the response. Chat events for the
+          // follow-up carry that runId, so we only accept events matching it.
           if (result?.status === "pending") {
-            acceptingAnyRunId = true;
+            if (result.followupRunId) {
+              acceptedFollowupRunId = result.followupRunId;
+            }
             return;
           }
           emptyFinalFallbackTimer = window.setTimeout(() => {
@@ -393,8 +396,9 @@ function waitForChatResult(params: {
         return true;
       }
       // After a pending queued turn, the follow-up run gets a new random runId
-      // that we cannot predict from the wait response. Accept any valid runId.
-      if (acceptingAnyRunId && payloadRunId.length > 0) {
+      // that the gateway communicates via followupRunId in the wait response.
+      // Only accept events carrying that exact follow-up runId.
+      if (acceptedFollowupRunId && payloadRunId === acceptedFollowupRunId) {
         return true;
       }
       return false;
@@ -416,7 +420,7 @@ function waitForChatResult(params: {
         }
         // A different run (e.g. queued follow-up) delivered empty final —
         // start the grace timer without re-querying the wait endpoint.
-        if (acceptingAnyRunId) {
+        if (acceptedFollowupRunId) {
           emptyFinalFallbackTimer = window.setTimeout(() => {
             settleResolve("OpenClaw finished with no text.");
           }, EMPTY_FINAL_FALLBACK_GRACE_MS);

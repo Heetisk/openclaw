@@ -628,15 +628,19 @@ export function createAgentTurnService(
         : 30_000;
     const activeChatEntry = context.chatAbortControllers.get(runId);
     const hasActiveChatRun = activeChatEntry !== undefined && activeChatEntry.kind !== "agent";
-    const queuedResult = () =>
-      context.chatQueuedTurns.has(runId)
-        ? {
-            runId,
-            status: "pending" as const,
-            timeoutPhase: "queue" as const,
-            providerStarted: false,
-          }
-        : undefined;
+    const queuedResult = () => {
+      const entry = context.chatQueuedTurns.get(runId);
+      if (!entry) {
+        return undefined;
+      }
+      return {
+        runId,
+        status: "pending" as const,
+        timeoutPhase: "queue" as const,
+        providerStarted: false,
+        ...(entry.followupRunId ? { followupRunId: entry.followupRunId } : {}),
+      };
+    };
     const queuedBeforeWait = queuedResult();
     if (queuedBeforeWait) {
       return queuedBeforeWait;

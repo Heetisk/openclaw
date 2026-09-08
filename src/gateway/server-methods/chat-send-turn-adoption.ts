@@ -4,6 +4,7 @@ import {
   completeQueuedChatTurn,
   registerQueuedChatTurn,
   retireQueuedChatTurnCancellation,
+  setQueuedChatTurnFollowupRunId,
   type QueuedChatTurnMap,
 } from "../chat-queued-turns.js";
 import { createChatSendLateFollowupDisposition } from "./chat-send-late-followup.js";
@@ -84,6 +85,14 @@ export function createChatSendTurnAdoptionLifecycle(params: {
     },
     onCancellationRetired: () => {
       retireQueuedChatTurnCancellation(params.chatQueuedTurns, params.runId, params.controller);
+    },
+    onFollowupRunIdAllocated: (runId) => {
+      setQueuedChatTurnFollowupRunId(
+        params.chatQueuedTurns,
+        params.runId,
+        params.controller,
+        runId,
+      );
     },
     onSettled: () => {
       completeQueuedChatTurn(params.chatQueuedTurns, params.runId, params.controller);

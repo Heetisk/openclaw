@@ -20,6 +20,8 @@ export type QueuedChatTurnEntry = {
   agentId?: string;
   ownerConnId?: string;
   ownerDeviceId?: string;
+  /** RunId of the follow-up turn that was admitted from this queue entry. */
+  followupRunId?: string;
 };
 
 export type QueuedChatTurnMap = Map<string, QueuedChatTurnEntry>;
@@ -119,6 +121,29 @@ export function completeQueuedChatTurn(
   return entry?.controller === controller
     ? deleteQueuedChatTurnEntry(chatQueuedTurns, key, entry)
     : false;
+}
+
+/**
+ * Records the follow-up runId that was allocated for a queued turn, so that
+ * subsequent `agent.wait` responses can return the expected follow-up identity
+ * for secure client-side correlation.
+ */
+export function setQueuedChatTurnFollowupRunId(
+  chatQueuedTurns: QueuedChatTurnMap,
+  runId: string,
+  controller: AbortController,
+  followupRunId: string,
+): boolean {
+  const key = resolveExactRunId(runId);
+  if (!key) {
+    return false;
+  }
+  const entry = chatQueuedTurns.get(key);
+  if (!entry || entry.controller !== controller) {
+    return false;
+  }
+  entry.followupRunId = followupRunId;
+  return true;
 }
 
 /**
