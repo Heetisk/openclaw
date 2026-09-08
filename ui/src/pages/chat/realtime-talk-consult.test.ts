@@ -870,7 +870,7 @@ describe("RealtimeTalkSession consult handoff", () => {
       });
 
       // agent.wait resolves with pending — adoptedRunId is set to run-2
-      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1);
       expect(submit).not.toHaveBeenCalled();
 
       // Adopted run delivers text — should submit
@@ -889,7 +889,7 @@ describe("RealtimeTalkSession consult handoff", () => {
           },
         });
       }, 0);
-      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1);
       await consult;
 
       expect(submit).toHaveBeenCalledWith("call-1", {
@@ -947,7 +947,7 @@ describe("RealtimeTalkSession consult handoff", () => {
         submit,
       });
 
-      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1);
       expect(submit).not.toHaveBeenCalled();
 
       window.setTimeout(() => {
@@ -965,7 +965,7 @@ describe("RealtimeTalkSession consult handoff", () => {
           },
         });
       }, 0);
-      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1);
       await consult;
 
       expect(submit).toHaveBeenCalledWith("call-1", {
@@ -1023,7 +1023,7 @@ describe("RealtimeTalkSession consult handoff", () => {
         submit,
       });
 
-      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1);
       expect(submit).not.toHaveBeenCalled();
 
       // Adopted run delivers empty final — should fall back to no-text
@@ -1037,7 +1037,7 @@ describe("RealtimeTalkSession consult handoff", () => {
           },
         });
       }, 0);
-      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(1);
 
       // Grace period timer fires
       await vi.advanceTimersByTimeAsync(500);

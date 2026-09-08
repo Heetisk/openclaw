@@ -239,6 +239,7 @@ type ChatPayload = {
 };
 
 type AgentWaitResult = {
+  runId?: string;
   status?: string;
   error?: string;
   stopReason?: string;
@@ -328,7 +329,6 @@ function waitForChatResult(params: {
     let emptyFinalWaitStarted = false;
     let emptyFinalFallbackTimer: number | undefined;
     let adoptedRunId: string | undefined;
-    let pendingWaitReject: ((error: Error) => void) | undefined;
     const onAbort = () => {
       settleReject(new DOMException("OpenClaw tool call aborted", "AbortError"));
     };
@@ -361,7 +361,6 @@ function waitForChatResult(params: {
           timeoutMs: params.timeoutMs,
         })
         .then((result) => {
-          pendingWaitReject = undefined;
           if (settled) {
             return;
           }
