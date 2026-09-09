@@ -182,6 +182,7 @@ export async function startGatewayEarlyRuntime(params: {
         dedupe: params.dedupe,
         chatAbortControllers: params.chatAbortControllers,
         chatQueuedTurns: params.chatQueuedTurns,
+        retiredFollowupRunIds: params.retiredFollowupRunIds,
         restartRecoveryCandidates: params.restartRecoveryCandidates,
         chatRunState: params.chatRunState,
         removeChatRun: params.removeChatRun,
