@@ -11,6 +11,9 @@ import { setGatewayDedupeEntry, waitForAgentJob } from "./agent-job.js";
 function waitThroughGateway(
   params: { runId: string; timeoutMs: number },
   activeKind?: "agent" | "chat",
+  opts?: {
+    retiredFollowupRunIds?: Map<string, string>;
+  },
 ) {
   const respond = vi.fn();
   const handler = expectDefined(
@@ -26,6 +29,7 @@ function waitThroughGateway(
           ? new Map([[params.runId, { kind: activeKind }]])
           : new Map(),
         chatQueuedTurns: new Map(),
+        retiredFollowupRunIds: opts?.retiredFollowupRunIds ?? new Map(),
       },
     } as unknown as Parameters<typeof handler>[0]),
   );
@@ -377,4 +381,31 @@ describe("agent.wait gateway dedupe observations", () => {
       expect(JSON.stringify(waiter.respond.mock.calls[0]?.[1])).not.toContain("private-target");
     },
   );
+
+  it("returns retired follow-up runId in pending response after queue settlement", async () => {
+    // Regression test for scope bug: the retiredFollowupRunId was declared
+    // inside queuedResult() but the getRetiredFollowupRunId() closure is used
+    // to read from the retiredFollowupRunIds map. When a queued follow-up
+    // has settled (entry deleted from chatQueuedTurns), the follow-up runId
+    // is preserved in retiredFollowupRunIds so the pending agent.wait
+    // response can still carry it for client-side correlation (fast-completion
+    // race). This exercises the queuedResult() path that reads the retired map.
+    const runId = "run-retired-followup-pending";
+    const followupRunId = "run-followup-retired";
+    const retiredFollowupRunIds = new Map([[runId, followupRunId]]);
+    const waiter = waitThroughGateway({ runId, timeoutMs: 0 }, undefined, {
+      retiredFollowupRunIds,
+    });
+    await waiter.promise;
+    expect(waiter.respond).toHaveBeenCalledWith(
+      true,
+      expect.objectContaining({
+        runId,
+        status: "pending",
+        timeoutPhase: "queue",
+        providerStarted: false,
+        followupRunId,
+      }),
+    );
+  });
 });
