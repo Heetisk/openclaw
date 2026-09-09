@@ -320,13 +320,17 @@ function waitForChatResult(params: {
     let observePendingFollowupRunIdAbort = () => {};
 
     const settleResolve = (value: string) => {
-      if (settled) return;
+      if (settled) {
+        return;
+      }
       settled = true;
       cleanup();
       resolve(value);
     };
     const settleReject = (error: Error | DOMException) => {
-      if (settled) return;
+      if (settled) {
+        return;
+      }
       settled = true;
       cleanup();
       reject(error);
@@ -339,7 +343,9 @@ function waitForChatResult(params: {
     });
 
     const applyDisposition = (d: ChatEventDisposition) => {
-      if (settled) return;
+      if (settled) {
+        return;
+      }
       if (d.type === "terminal") {
         settleResolve(d.text ?? EMPTY_FINAL_FALLBACK_TEXT);
       } else if (d.type === "empty_final_fallback") {
@@ -372,7 +378,9 @@ function waitForChatResult(params: {
     };
 
     const waitForEmptyFinalFallback = () => {
-      if (emptyFinalWaitStarted) return;
+      if (emptyFinalWaitStarted) {
+        return;
+      }
       emptyFinalWaitStarted = true;
       void params.client
         .request<AgentWaitResult>("agent.wait", {
@@ -380,13 +388,17 @@ function waitForChatResult(params: {
           timeoutMs: params.timeoutMs,
         })
         .then((result) => {
-          if (settled) return;
+          if (settled) {
+            return;
+          }
           const waitError = getTerminalAgentWaitError(result);
           if (waitError) {
             settleReject(waitError);
             return;
           }
-          if (result?.status === "timeout") return;
+          if (result?.status === "timeout") {
+            return;
+          }
           // pending (queued turn) is non-terminal — the gateway's waitForTurn
           // returns the same runId and, when a follow-up has been admitted,
           // includes the follow-up's runId in the response. Chat events for the
@@ -428,7 +440,9 @@ function waitForChatResult(params: {
     params.signal?.addEventListener("abort", onAbort, { once: true });
     const unsubscribe = params.client.addEventListener((evt: GatewayEventFrame) => {
       const d = chatHandler.handleEvent(evt);
-      if (d) applyDisposition(d);
+      if (d) {
+        applyDisposition(d);
+      }
     });
 
     function cleanup() {

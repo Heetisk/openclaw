@@ -1,5 +1,5 @@
 import type { GatewayEventFrame } from "../../api/gateway.ts";
-import type { RealtimeTalkEventInput, ChatPayload } from "./realtime-talk-shared";
+import type { RealtimeTalkEventInput, ChatPayload } from "./realtime-talk-shared.js";
 
 /** Result of processing a chat event — either settled or needs further action. */
 export type ChatEventDisposition =
