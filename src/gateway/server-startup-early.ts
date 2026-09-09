@@ -47,6 +47,7 @@ export async function startGatewayEarlyRuntime(params: {
   dedupe: GatewayMaintenanceParams["dedupe"];
   chatAbortControllers: GatewayMaintenanceParams["chatAbortControllers"];
   chatQueuedTurns: GatewayMaintenanceParams["chatQueuedTurns"];
+  retiredFollowupRunIds: GatewayMaintenanceParams["retiredFollowupRunIds"];
   restartRecoveryCandidates: GatewayMaintenanceParams["restartRecoveryCandidates"];
   chatRunState: GatewayMaintenanceParams["chatRunState"];
   removeChatRun: GatewayMaintenanceParams["removeChatRun"];
