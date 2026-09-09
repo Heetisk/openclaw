@@ -200,6 +200,7 @@ export function startChatDispatch(params: StartChatDispatchParams): void {
   const queuedFollowup = createChatSendTurnAdoptionLifecycle({
     accountId,
     chatQueuedTurns: context.chatQueuedTurns,
+    retiredFollowupRunIds: context.retiredFollowupRunIds,
     context,
     runId: clientRunId,
     controller: activeRunAbort.controller,

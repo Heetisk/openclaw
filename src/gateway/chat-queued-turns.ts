@@ -124,6 +124,28 @@ export function completeQueuedChatTurn(
 }
 
 /**
+ * Retire a completed queued turn's follow-up runId so that subsequent
+ * `agent.wait` terminal responses can still return it for client-side
+ * correlation, even though the queue entry has been deleted.
+ *
+ * This handles the fast-completion race: if the follow-up completes between
+ * identity polls, `completeQueuedChatTurn` deletes the entry before the
+ * client discovers the ID. By preserving the mapping here, `waitForTurn`
+ * includes `followupRunId` in the terminal snapshot response.
+ */
+export function retireFollowupRunId(
+  retiredFollowupRunIds: Map<string, string>,
+  runId: string,
+  followupRunId: string | undefined,
+): void {
+  const key = resolveExactRunId(runId);
+  if (!key || !followupRunId) {
+    return;
+  }
+  retiredFollowupRunIds.set(key, followupRunId);
+}
+
+/**
  * Records the follow-up runId that was allocated for a queued turn, so that
  * subsequent `agent.wait` responses can return the expected follow-up identity
  * for secure client-side correlation.

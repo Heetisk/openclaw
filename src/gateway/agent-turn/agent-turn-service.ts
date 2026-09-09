@@ -628,9 +628,25 @@ export function createAgentTurnService(
         : 30_000;
     const activeChatEntry = context.chatAbortControllers.get(runId);
     const hasActiveChatRun = activeChatEntry !== undefined && activeChatEntry.kind !== "agent";
+    const getRetiredFollowupRunId = () => {
+      return context.retiredFollowupRunIds.get(runId);
+    };
     const queuedResult = () => {
       const entry = context.chatQueuedTurns.get(runId);
       if (!entry) {
+        // Queue entry was deleted by settlement, but preserve the follow-up
+        // identity so the terminal response can still carry it for client-side
+        // correlation. This handles the fast-completion race.
+        const retiredFollowupRunId = getRetiredFollowupRunId();
+        if (retiredFollowupRunId) {
+          return {
+            runId,
+            status: "pending" as const,
+            timeoutPhase: "queue" as const,
+            providerStarted: false,
+            followupRunId: retiredFollowupRunId,
+          };
+        }
         return undefined;
       }
       return {
@@ -654,10 +670,12 @@ export function createAgentTurnService(
     if (queuedAfterWait) {
       return queuedAfterWait;
     }
+    const retiredFollowupRunId = getRetiredFollowupRunId();
     if (!snapshot) {
       return {
         runId,
         status: "timeout" as const,
+        ...(retiredFollowupRunId ? { followupRunId: retiredFollowupRunId } : {}),
       };
     }
     return {
@@ -675,6 +693,7 @@ export function createAgentTurnService(
       ...(snapshot.terminalDelivery ? { terminalDelivery: snapshot.terminalDelivery } : {}),
       terminalReceipt: snapshot.terminalReceipt,
       terminalReply: snapshot.terminalReply,
+      ...(retiredFollowupRunId ? { followupRunId: retiredFollowupRunId } : {}),
     };
   };
 

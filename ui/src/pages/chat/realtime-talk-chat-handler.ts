@@ -31,9 +31,26 @@ export interface ChatHandlerDeps {
  * lifecycle (resolve/reject/cleanup) — the handler owns only the runId
  * correlation, buffering, and replay logic.
  */
+/** Maximum number of terminal events retained for recovery before follow-up ID discovery. */
+const MAX_BUFFERED_TERMINAL_EVENTS = 4;
+/** Approximate byte ceiling for buffered terminal events. */
+const MAX_BUFFERED_BYTES = 64 * 1024;
+
+function estimatePayloadBytes(payload: ChatPayload): number {
+  try {
+    return JSON.stringify(payload).length;
+  } catch {
+    return 0;
+  }
+}
+
 export function createChatHandler(deps: ChatHandlerDeps) {
+  // Only buffer terminal events (final, aborted, error) — progress/deltas
+  // from unrelated runs are not needed for recovery and can consume unbounded
+  // memory through streaming snapshots.
   const bufferedFollowupEvents: ChatPayload[] = [];
   let acceptedFollowupRunId: string | undefined;
+  let bufferedBytes = 0;
 
   const matchesActiveRun = (payloadRunId: string): boolean => {
     if (payloadRunId === deps.runId) {
@@ -48,20 +65,41 @@ export function createChatHandler(deps: ChatHandlerDeps) {
     return false;
   };
 
+  const bufferEvent = (payload: ChatPayload) => {
+    const bytes = estimatePayloadBytes(payload);
+    if (
+      bufferedFollowupEvents.length >= MAX_BUFFERED_TERMINAL_EVENTS ||
+      bufferedBytes + bytes > MAX_BUFFERED_BYTES
+    ) {
+      // Drop the oldest entry to make room, preserving newest terminal events.
+      const oldest = bufferedFollowupEvents.shift();
+      if (oldest) {
+        bufferedBytes -= estimatePayloadBytes(oldest);
+      }
+    }
+    bufferedFollowupEvents.push(payload);
+    bufferedBytes += bytes;
+  };
+
   const processChatEvent = (payload: ChatPayload): ChatEventDisposition => {
     if (!matchesActiveRun(payload.runId ?? "")) {
       // A chat event arrived for a run we don't recognize. If we haven't
-      // discovered the follow-up runId yet, buffer it so it can be recovered
-      // when we do. Once the follow-up runId is known, unmatched events are
-      // genuinely unrelated and can be safely dropped.
+      // discovered the follow-up runId yet, buffer terminal events (final,
+      // aborted, error) so they can be recovered for replay. Progress deltas
+      // and full stream snapshots are not needed for recovery and are dropped
+      // to bound memory usage. Once the follow-up runId is known, unmatched
+      // events are genuinely unrelated and can be safely dropped.
       if (!acceptedFollowupRunId) {
-        bufferedFollowupEvents.push(payload);
+        if (payload.state === "final" || payload.state === "aborted" || payload.state === "error") {
+          bufferEvent(payload);
+        }
       }
       return { type: "buffer" };
     }
     // This event belongs to a known active run. Clear the buffer since we
     // no longer need to check future events against the undiscovered runId.
     bufferedFollowupEvents.length = 0;
+    bufferedBytes = 0;
 
     if (payload.stream === "tool") {
       emitRealtimeTalkAgentProgress(deps.emitTalkEvent, payload);
@@ -110,6 +148,7 @@ export function createChatHandler(deps: ChatHandlerDeps) {
 
   const cleanup = () => {
     bufferedFollowupEvents.length = 0;
+    bufferedBytes = 0;
   };
 
   return {

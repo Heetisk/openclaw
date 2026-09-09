@@ -3,6 +3,7 @@ import type { QueuedFollowupReplyBatch } from "../../auto-reply/reply/queue/type
 import {
   completeQueuedChatTurn,
   registerQueuedChatTurn,
+  retireFollowupRunId,
   retireQueuedChatTurnCancellation,
   setQueuedChatTurnFollowupRunId,
   type QueuedChatTurnMap,
@@ -16,6 +17,7 @@ import type { GatewayRequestContext } from "./types.js";
 export function createChatSendTurnAdoptionLifecycle(params: {
   accountId: string | undefined;
   chatQueuedTurns: QueuedChatTurnMap;
+  retiredFollowupRunIds: Map<string, string>;
   context: GatewayRequestContext;
   runId: string;
   controller: AbortController;
@@ -95,6 +97,14 @@ export function createChatSendTurnAdoptionLifecycle(params: {
       );
     },
     onSettled: () => {
+      // Preserve the follow-up runId before deleting the queue entry so that
+      // waitForTurn can return it in the terminal snapshot response. This
+      // handles the fast-completion race where the follow-up finishes before
+      // the client's next identity poll discovers the ID.
+      const entry = params.chatQueuedTurns.get(params.runId);
+      if (entry) {
+        retireFollowupRunId(params.retiredFollowupRunIds, params.runId, entry.followupRunId);
+      }
       completeQueuedChatTurn(params.chatQueuedTurns, params.runId, params.controller);
       releaseWorkAdmission?.();
       releaseWorkAdmission = undefined;
