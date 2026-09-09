@@ -14,7 +14,6 @@ export interface AgentWaitResult {
   followupRunId?: string;
 }
 
-const FOLLOWUP_POLL_MAX_RETRIES = 10;
 const FOLLOWUP_POLL_INTERVAL_MS = 2000;
 
 /**
@@ -37,8 +36,12 @@ export function observePendingFollowupRunId(params: {
   onFollowupObserved: (followupRunId: string) => void;
   onError: (error: Error) => void;
 }): () => void {
-  let retry = 0;
+  let startTime = 0;
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+  const isDeadlineReached = () => {
+    return Date.now() - startTime >= params.timeoutMs;
+  };
 
   const poll = () => {
     if (timeoutId !== undefined) {
@@ -48,10 +51,9 @@ export function observePendingFollowupRunId(params: {
     if (params.isSettled() || params.isFollowupObserved()) {
       return;
     }
-    if (retry >= FOLLOWUP_POLL_MAX_RETRIES) {
+    if (isDeadlineReached()) {
       return;
     }
-    retry += 1;
     void params.client
       .request("agent.wait", {
         runId: params.runId,
@@ -59,6 +61,9 @@ export function observePendingFollowupRunId(params: {
       })
       .then((result) => {
         if (params.isSettled() || params.isFollowupObserved()) {
+          return;
+        }
+        if (isDeadlineReached()) {
           return;
         }
         const status = result?.status;
@@ -71,24 +76,25 @@ export function observePendingFollowupRunId(params: {
           params.onFollowupObserved(result.followupRunId);
           return;
         }
-        if (status === "pending") {
-          timeoutId = setTimeout(poll, FOLLOWUP_POLL_INTERVAL_MS);
-          return;
-        }
-        // Any other status means the wait resolved differently than expected;
-        // poll again to re-check rather than abandoning the follow-up.
-        timeoutId = setTimeout(poll, FOLLOWUP_POLL_INTERVAL_MS);
+        // Schedule the next poll using the remaining consultation deadline.
+        const remaining = params.timeoutMs - (Date.now() - startTime);
+        timeoutId = setTimeout(poll, Math.min(FOLLOWUP_POLL_INTERVAL_MS, remaining));
       })
       .catch(() => {
         if (params.isFollowupObserved()) {
           return;
         }
-        timeoutId = setTimeout(poll, FOLLOWUP_POLL_INTERVAL_MS);
+        if (isDeadlineReached()) {
+          return;
+        }
+        const remaining = params.timeoutMs - (Date.now() - startTime);
+        timeoutId = setTimeout(poll, Math.min(FOLLOWUP_POLL_INTERVAL_MS, remaining));
       });
   };
 
   // Delay the first poll so a same-frame follow-upRunId in the pending
   // response is captured synchronously before polling begins.
+  startTime = Date.now();
   timeoutId = setTimeout(poll, FOLLOWUP_POLL_INTERVAL_MS);
   return () => {
     if (timeoutId !== undefined) {
@@ -97,4 +103,4 @@ export function observePendingFollowupRunId(params: {
   };
 }
 
-export { FOLLOWUP_POLL_MAX_RETRIES, FOLLOWUP_POLL_INTERVAL_MS };
+export { FOLLOWUP_POLL_INTERVAL_MS };
