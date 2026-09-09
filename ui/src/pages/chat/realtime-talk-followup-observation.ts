@@ -1,4 +1,18 @@
-import type { AgentWaitResult } from "./realtime-talk-shared.ts";
+/** Result of an `agent.wait` Gateway request. */
+export interface AgentWaitResult {
+  status?: string;
+  error?: string;
+  stopReason?: string;
+  endedAt?: number;
+  pendingError?: boolean;
+  timeoutPhase?: string;
+  providerStarted?: boolean;
+  aborted?: boolean;
+  livenessState?: string;
+  yielded?: boolean;
+  /** RunId of the follow-up turn admitted from this queue, for secure client-side correlation. */
+  followupRunId?: string;
+}
 
 const FOLLOWUP_POLL_MAX_RETRIES = 10;
 const FOLLOWUP_POLL_INTERVAL_MS = 2000;

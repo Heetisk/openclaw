@@ -12,7 +12,10 @@ import type { TalkEvent } from "../../../../src/talk/talk-events.js";
 import type { GatewayBrowserClient, GatewayEventFrame } from "../../api/gateway.ts";
 // Control UI chat module implements realtime talk shared behavior.
 import { formatUiError } from "../../lib/format-error.ts";
-import { observePendingFollowupRunId } from "./realtime-talk-followup-observation.ts";
+import {
+  observePendingFollowupRunId,
+  type AgentWaitResult,
+} from "./realtime-talk-followup-observation.ts";
 import type { RealtimeTalkInputController } from "./realtime-talk-input.ts";
 
 export type RealtimeTalkStatus = "idle" | "connecting" | "listening" | "thinking" | "error";
@@ -237,21 +240,6 @@ type ChatPayload = {
   errorMessage?: string;
   data?: unknown;
   message?: unknown;
-};
-
-export type AgentWaitResult = {
-  status?: string;
-  error?: string;
-  stopReason?: string;
-  endedAt?: number;
-  pendingError?: boolean;
-  timeoutPhase?: string;
-  providerStarted?: boolean;
-  aborted?: boolean;
-  livenessState?: string;
-  yielded?: boolean;
-  /** RunId of the follow-up turn admitted from this queue, for secure client-side correlation. */
-  followupRunId?: string;
 };
 
 const EMPTY_FINAL_FALLBACK_GRACE_MS = 500;
