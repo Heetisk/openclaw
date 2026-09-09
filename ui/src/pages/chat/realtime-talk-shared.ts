@@ -12,6 +12,7 @@ import type { TalkEvent } from "../../../../src/talk/talk-events.js";
 import type { GatewayBrowserClient, GatewayEventFrame } from "../../api/gateway.ts";
 // Control UI chat module implements realtime talk shared behavior.
 import { formatUiError } from "../../lib/format-error.ts";
+import { observePendingFollowupRunId } from "./realtime-talk-followup-observation.ts";
 import type { RealtimeTalkInputController } from "./realtime-talk-input.ts";
 
 export type RealtimeTalkStatus = "idle" | "connecting" | "listening" | "thinking" | "error";
@@ -238,7 +239,7 @@ type ChatPayload = {
   message?: unknown;
 };
 
-type AgentWaitResult = {
+export type AgentWaitResult = {
   status?: string;
   error?: string;
   stopReason?: string;
@@ -384,7 +385,7 @@ function waitForChatResult(params: {
             }
             // The follow-up ID may not be allocated yet — observe the queue
             // entry so we can capture it when admission completes.
-            observePendingFollowupRunId();
+            startObservingPendingFollowupRunId();
             return;
           }
           emptyFinalFallbackTimer = window.setTimeout(() => {
@@ -395,53 +396,21 @@ function waitForChatResult(params: {
           settleReject(error instanceof Error ? error : new Error(String(error)));
         });
     };
-    const observePendingFollowupRunId = () => {
+    let observePendingFollowupRunIdAbort = () => {};
+    const startObservingPendingFollowupRunId = () => {
       // The follow-up run ID is allocated after admitFollowupTurn runs. If the
       // first agent.wait response did not include it, poll again to observe it.
-      // Use a short interval and a maximum number of retries to avoid excessive
-      // polling while giving the gateway enough time to allocate the ID.
-      let retry = 0;
-      const maxRetries = 10;
-      const intervalMs = 2000;
-      const poll = () => {
-        if (settled || acceptedFollowupRunId) {
-          return;
-        }
-        if (retry >= maxRetries) {
-          return;
-        }
-        retry++;
-        void params.client
-          .request<AgentWaitResult>("agent.wait", {
-            runId: params.runId,
-            timeoutMs: intervalMs,
-          })
-          .then((result) => {
-            if (settled || acceptedFollowupRunId) {
-              return;
-            }
-            const waitError = getTerminalAgentWaitError(result);
-            if (waitError) {
-              settleReject(waitError);
-              return;
-            }
-            if (result?.status === "pending" && result.followupRunId) {
-              acceptedFollowupRunId = result.followupRunId;
-              return;
-            }
-            if (result?.status === "pending") {
-              poll();
-            }
-          })
-          .catch(() => {
-            // Non-terminal — retry unless we've hit the limit.
-            if (acceptedFollowupRunId) {
-              return;
-            }
-            poll();
-          });
-      };
-      window.setTimeout(poll, intervalMs);
+      observePendingFollowupRunIdAbort = observePendingFollowupRunId({
+        client: params.client,
+        runId: params.runId,
+        timeoutMs: params.timeoutMs,
+        isSettled: () => settled,
+        isFollowupObserved: () => acceptedFollowupRunId !== undefined,
+        onFollowupObserved: (followupRunId) => {
+          acceptedFollowupRunId = followupRunId;
+        },
+        onError: settleReject,
+      });
     };
     const matchesActiveRun = (payloadRunId: string) => {
       if (payloadRunId === params.runId) {
@@ -492,6 +461,7 @@ function waitForChatResult(params: {
       if (emptyFinalFallbackTimer !== undefined) {
         window.clearTimeout(emptyFinalFallbackTimer);
       }
+      observePendingFollowupRunIdAbort();
       params.signal?.removeEventListener("abort", onAbort);
       unsubscribe();
     }
