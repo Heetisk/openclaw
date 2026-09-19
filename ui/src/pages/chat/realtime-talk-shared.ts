@@ -382,14 +382,14 @@ function waitForChatResult(params: {
     const onFollowupRunIdDiscovered = (followupRunId: string) => {
       chatHandler.setAcceptedFollowupRunId(followupRunId);
       const replayed = chatHandler.replayBufferedFollowupEvents();
+      const replayRecoveredFollowup = replayed.some((d) => d.type !== "buffer");
       for (const d of replayed) {
         applyDisposition(d);
       }
-      // If the buffer was evicted before discovery (oversized terminal event
-      // dropped, or older events evicted by aggregate pressure), replaying
-      // finds nothing. Recover the follow-up's canonical terminal snapshot
-      // directly while staying inside the original consultation deadline.
-      if (replayed.length === 0 && !settled) {
+      // Only terminal events are buffered, so any non-buffer disposition came
+      // from the discovered follow-up. Recover the canonical snapshot when the
+      // replay contained only unrelated buffered events or nothing at all.
+      if (!replayRecoveredFollowup && !settled) {
         recoverFollowupReply(followupRunId);
       }
     };
@@ -421,20 +421,19 @@ function waitForChatResult(params: {
             settleReject(waitError);
             return;
           }
+          // A timeout can still carry the newly admitted follow-up runId.
+          // Consume it before treating the original run's timeout as terminal.
+          if (result?.followupRunId) {
+            onFollowupRunIdDiscovered(result.followupRunId);
+            return;
+          }
           if (result?.status === "timeout") {
             return;
           }
           // pending (queued turn) is non-terminal — the gateway's waitForTurn
-          // returns the same runId and, when a follow-up has been admitted,
-          // includes the follow-up's runId in the response. Chat events for the
-          // follow-up carry that runId, so we only accept events matching it.
+          // returns the same runId. The follow-up ID may not be allocated yet,
+          // so observe the queue entry until admission completes.
           if (result?.status === "pending") {
-            if (result.followupRunId) {
-              onFollowupRunIdDiscovered(result.followupRunId);
-              return;
-            }
-            // The follow-up ID may not be allocated yet — observe the queue
-            // entry so we can capture it when admission completes.
             observePendingFollowupRunIdAbort = observePendingFollowupRunId({
               client: params.client,
               runId: params.runId,
@@ -446,14 +445,6 @@ function waitForChatResult(params: {
               onFollowupObserved: onFollowupRunIdDiscovered,
               onError: settleReject,
             });
-            return;
-          }
-          // A terminal (ok) response may carry a follow-up runId when the
-          // follow-up has already settled before this first wait resolved.
-          // Consume it so buffered events for the follow-up can be replayed
-          // instead of discarding the answer behind the empty fallback.
-          if (result?.followupRunId) {
-            onFollowupRunIdDiscovered(result.followupRunId);
             return;
           }
           emptyFinalFallbackTimer = window.setTimeout(() => {

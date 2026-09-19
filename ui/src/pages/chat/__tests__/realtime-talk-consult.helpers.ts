@@ -57,6 +57,11 @@ export function terminalWithFollowup(
   return { runId, status: "ok" as const, followupRunId, terminalReply };
 }
 
+/** Create a timeout response that still identifies the admitted follow-up run. */
+export function timeoutWithFollowup(runId: string, followupRunId: string) {
+  return { runId, status: "timeout" as const, followupRunId };
+}
+
 /**
  * Create an empty-final chat event payload for the given runId.
  */
