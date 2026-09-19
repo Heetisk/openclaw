@@ -1,0 +1,1747 @@
+/* @vitest-environment jsdom */
+
+import { describe, expect, expectTypeOf, it, vi } from "vitest";
+import { createDeferred } from "../../../../test/helpers/promise.js";
+import {
+  createMockAddEventListener,
+  EMPTY_FINAL_FALLBACK,
+  emptyFinalPayload,
+  pendingWithFollowup,
+  pendingWithoutFollowup,
+  terminalOk,
+  terminalWithFollowup,
+  timeoutWithFollowup,
+  textFinalPayload,
+} from "./__tests__/realtime-talk-consult.helpers.ts";
+import type { AgentWaitResult } from "./realtime-talk-followup-observation.ts";
+import {
+  steerRealtimeTalkActiveConsult,
+  submitRealtimeTalkConsult,
+} from "./realtime-talk-shared.ts";
+
+function requireFirstMockCall(calls: readonly unknown[][], label: string): unknown[] {
+  const call = calls.at(0);
+  if (!call) {
+    throw new Error(`expected ${label} call`);
+  }
+  return call;
+}
+
+describe("RealtimeTalkSession consult handoff", () => {
+  it("keeps AgentWaitResult on the canonical Gateway status union", () => {
+    expectTypeOf<AgentWaitResult["status"]>().toEqualTypeOf<
+      "ok" | "timeout" | "error" | "pending"
+    >();
+  });
+
+  it("submits realtime consults through the Gateway tool-call endpoint", async () => {
+    const order: string[] = [];
+    const listener = createMockAddEventListener();
+    const request = vi.fn(async (method: string) => {
+      if (method === "talk.client.toolCall") {
+        order.push("tool-call");
+        setImmediate(() => {
+          listener.emitChat({
+            runId: "run-1",
+            state: "final",
+            message: { text: "Basement lights are off." },
+          });
+        });
+        return {
+          runId: "run-1",
+          idempotencyKey: "run-1",
+          agentId: "main",
+          agentSessionKey: "agent:main:main",
+        };
+      }
+      throw new Error(`unexpected request: ${method}`);
+    });
+    const flushTranscriptWrites = vi.fn(async () => {
+      order.push("flush");
+    });
+
+    const submit = vi.fn();
+
+    await submitRealtimeTalkConsult({
+      ctx: {
+        client: { request, addEventListener: listener.addEventListener },
+        sessionKey: "agent:main:main",
+        voiceSessionId: "voice-1",
+        flushTranscriptWrites,
+        callbacks: {},
+      } as never,
+      callId: "call-1",
+      args: { question: "Are the basement lights off?" },
+      submit,
+    });
+
+    const toolCall = requireFirstMockCall(request.mock.calls, "Gateway request") as
+      | [
+          string,
+          {
+            sessionKey?: string;
+            voiceSessionId?: string;
+            name?: string;
+            args?: { question?: string };
+          },
+        ]
+      | undefined;
+    expect(toolCall?.[0]).toBe("talk.client.toolCall");
+    expect(toolCall?.[1]?.sessionKey).toBe("agent:main:main");
+    expect(toolCall?.[1]).toMatchObject({ voiceSessionId: "voice-1" });
+    expect(toolCall?.[1]?.name).toBe("openclaw_agent_consult");
+    expect(toolCall?.[1]?.args).toEqual({ question: "Are the basement lights off?" });
+    expect(order).toEqual(["flush", "tool-call"]);
+    expect(submit).toHaveBeenCalledWith("call-1", { result: "Basement lights are off." });
+  });
+
+  it("does not start a consult after aborting during the transcript flush", async () => {
+    const flushPending = createDeferred();
+    const flushTranscriptWrites = vi.fn(async () => await flushPending.promise);
+    const listener = createMockAddEventListener();
+    const request = vi.fn();
+    const submit = vi.fn();
+    const controller = new AbortController();
+
+    const consult = submitRealtimeTalkConsult({
+      ctx: {
+        client: { request, addEventListener: listener.addEventListener },
+        sessionKey: "agent:main:main",
+        voiceSessionId: "voice-1",
+        flushTranscriptWrites,
+        callbacks: {},
+      } as never,
+      callId: "call-1",
+      args: { question: "Check status" },
+      submit,
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(flushTranscriptWrites).toHaveBeenCalledOnce());
+
+    controller.abort();
+    flushPending.resolve();
+    await consult;
+
+    expect(request).not.toHaveBeenCalled();
+    expect(submit).toHaveBeenCalledOnce();
+  });
+
+  it.each(["agent:voice:home", "global"])(
+    "keeps the acknowledgement alive and cancels its exact %s target",
+    async (agentSessionKey) => {
+      type Acknowledgement = { runId: string; agentId: string; agentSessionKey: string };
+      const pendingAcknowledgement = createDeferred<Acknowledgement>();
+      const request = vi.fn(
+        async (method: string, _params: unknown, options?: { signal?: AbortSignal }) => {
+          if (method === "talk.client.toolCall") {
+            expect(options).toBeUndefined();
+            return await pendingAcknowledgement.promise;
+          }
+          if (method === "chat.abort") {
+            return { ok: true, aborted: true };
+          }
+          throw new Error(`unexpected request: ${method}`);
+        },
+      );
+      const submit = vi.fn();
+      const controller = new AbortController();
+
+      const consult = submitRealtimeTalkConsult({
+        ctx: {
+          client: { request, addEventListener: vi.fn() },
+          sessionKey: "main",
+          callbacks: {},
+        } as never,
+        callId: "call-1",
+        args: { question: "Check status" },
+        submit,
+        signal: controller.signal,
+      });
+      await vi.waitFor(() => expect(request).toHaveBeenCalledOnce());
+
+      controller.abort();
+      pendingAcknowledgement.resolve({ runId: "run-1", agentId: "voice", agentSessionKey });
+      await consult;
+
+      expect(request).toHaveBeenCalledWith("chat.abort", {
+        sessionKey: agentSessionKey,
+        agentId: "voice",
+        runId: "run-1",
+      });
+      expect(submit).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("prefers source-reply final text over an earlier empty Talk consult final", async () => {
+    const listener = createMockAddEventListener();
+    const request = vi.fn(async (method: string) => {
+      if (method === "talk.client.toolCall") {
+        setImmediate(() => {
+          listener.emitChat({ runId: "run-1", state: "final", message: undefined });
+          listener.emitChat({
+            runId: "run-1",
+            state: "final",
+            message: {
+              role: "assistant",
+              provider: "openclaw",
+              model: "delivery-mirror",
+              text: "The requested status is green.",
+            },
+          });
+        });
+        return {
+          runId: "run-1",
+          idempotencyKey: "run-1",
+          agentId: "main",
+          agentSessionKey: "agent:main:main",
+        };
+      }
+      if (method === "agent.wait") {
+        return terminalOk("run-1");
+      }
+      throw new Error(`unexpected request: ${method}`);
+    });
+    const submit = vi.fn();
+
+    await submitRealtimeTalkConsult({
+      ctx: {
+        client: { request, addEventListener: listener.addEventListener },
+        sessionKey: "agent:main:main",
+        callbacks: {},
+      } as never,
+      callId: "call-1",
+      args: { question: "Check status" },
+      submit,
+    });
+
+    expect(submit).toHaveBeenCalledWith("call-1", {
+      result: "The requested status is green.",
+    });
+  });
+
+  it("waits past the old empty-final grace window for delayed source-reply final text", async () => {
+    vi.useFakeTimers();
+    try {
+      const listener = createMockAddEventListener();
+      const request = vi.fn(async (method: string) => {
+        if (method === "talk.client.toolCall") {
+          window.setTimeout(() => {
+            listener.emitChat(emptyFinalPayload("run-1"));
+            window.setTimeout(() => {
+              listener.emitChat(textFinalPayload("run-1", "The slow source reply wins."));
+            }, 300);
+          }, 0);
+          return {
+            runId: "run-1",
+            idempotencyKey: "run-1",
+            agentId: "main",
+            agentSessionKey: "agent:main:main",
+          };
+        }
+        if (method === "agent.wait") {
+          return new Promise(() => {});
+        }
+        throw new Error(`unexpected request: ${method}`);
+      });
+      const submit = vi.fn();
+
+      const consult = submitRealtimeTalkConsult({
+        ctx: {
+          client: { request, addEventListener: listener.addEventListener },
+          sessionKey: "agent:main:main",
+          callbacks: {},
+        } as never,
+        callId: "call-1",
+        args: { question: "Check status" },
+        submit,
+      });
+
+      await vi.advanceTimersByTimeAsync(251);
+      expect(submit).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(50);
+      await consult;
+
+      expect(submit).toHaveBeenCalledWith("call-1", {
+        result: "The slow source reply wins.",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps source-reply final text when the empty-final wait completes later", async () => {
+    const listener = createMockAddEventListener();
+    const waitResult = createDeferred<{ runId: string; status: "ok" }>();
+    const request = vi.fn(async (method: string) => {
+      if (method === "talk.client.toolCall") {
+        setImmediate(() => {
+          listener.emitChat(emptyFinalPayload("run-1"));
+          setImmediate(() => {
+            listener.emitChat(textFinalPayload("run-1", "The source reply still wins."));
+          });
+        });
+        return {
+          runId: "run-1",
+          idempotencyKey: "run-1",
+          agentId: "main",
+          agentSessionKey: "agent:main:main",
+        };
+      }
+      if (method === "agent.wait") {
+        return await waitResult.promise;
+      }
+      throw new Error(`unexpected request: ${method}`);
+    });
+    const submit = vi.fn();
+
+    await submitRealtimeTalkConsult({
+      ctx: {
+        client: { request, addEventListener: listener.addEventListener },
+        sessionKey: "agent:main:main",
+        callbacks: {},
+      } as never,
+      callId: "call-1",
+      args: { question: "Check status" },
+      submit,
+    });
+    waitResult.resolve({ runId: "run-1", status: "ok" });
+    await Promise.resolve();
+
+    expect(request).toHaveBeenCalledWith(
+      "agent.wait",
+      {
+        runId: "run-1",
+        timeoutMs: expect.any(Number),
+      },
+      {
+        timeoutMs: expect.any(Number),
+        signal: undefined,
+      },
+    );
+    expect(request.mock.calls.find(([method]) => method === "agent.wait")?.[1]).toMatchObject({
+      timeoutMs: expect.any(Number),
+    });
+    expect(request.mock.calls.find(([method]) => method === "agent.wait")?.[1]).toEqual({
+      runId: "run-1",
+      timeoutMs: expect.any(Number),
+    });
+    expect(
+      request.mock.calls.find(([method]) => method === "agent.wait")?.[1]?.timeoutMs,
+    ).toBeLessThanOrEqual(120_000);
+    expect(request.mock.calls.find(([method]) => method === "agent.wait")?.[2]).toMatchObject({
+      timeoutMs: expect.any(Number),
+      signal: undefined,
+    });
+    expect(submit).toHaveBeenCalledTimes(1);
+    expect(submit).toHaveBeenCalledWith("call-1", {
+      result: "The source reply still wins.",
+    });
+  });
+
+  it("keeps source-reply final text when the empty-final wait completes first", async () => {
+    vi.useFakeTimers();
+    try {
+      const listener = createMockAddEventListener();
+      const request = vi.fn(async (method: string) => {
+        if (method === "talk.client.toolCall") {
+          window.setTimeout(() => {
+            listener.emitChat(emptyFinalPayload("run-1"));
+            window.setTimeout(() => {
+              listener.emitChat(textFinalPayload("run-1", "The source reply beats the fallback."));
+            }, 300);
+          }, 0);
+          return {
+            runId: "run-1",
+            idempotencyKey: "run-1",
+            agentId: "main",
+            agentSessionKey: "agent:main:main",
+          };
+        }
+        if (method === "agent.wait") {
+          return terminalOk("run-1");
+        }
+        throw new Error(`unexpected request: ${method}`);
+      });
+      const submit = vi.fn();
+
+      const consult = submitRealtimeTalkConsult({
+        ctx: {
+          client: { request, addEventListener: listener.addEventListener },
+          sessionKey: "agent:main:main",
+          callbacks: {},
+        } as never,
+        callId: "call-1",
+        args: { question: "Check status" },
+        submit,
+      });
+
+      await vi.advanceTimersByTimeAsync(300);
+      await consult;
+
+      expect(submit).toHaveBeenCalledTimes(1);
+      expect(submit).toHaveBeenCalledWith("call-1", {
+        result: "The source reply beats the fallback.",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("submits the no-text fallback after an empty final and completed Gateway run", async () => {
+    const listener = createMockAddEventListener();
+    const request = vi.fn(async (method: string) => {
+      if (method === "talk.client.toolCall") {
+        setImmediate(() => {
+          listener.emitChat(emptyFinalPayload("run-1"));
+        });
+        return {
+          runId: "run-1",
+          idempotencyKey: "run-1",
+          agentId: "main",
+          agentSessionKey: "agent:main:main",
+        };
+      }
+      if (method === "agent.wait") {
+        return terminalOk("run-1");
+      }
+      throw new Error(`unexpected request: ${method}`);
+    });
+    const submit = vi.fn();
+
+    await submitRealtimeTalkConsult({
+      ctx: {
+        client: { request, addEventListener: listener.addEventListener },
+        sessionKey: "agent:main:main",
+        callbacks: {},
+      } as never,
+      callId: "call-1",
+      args: { question: "Check status" },
+      submit,
+    });
+
+    expect(request).toHaveBeenCalledWith(
+      "agent.wait",
+      {
+        runId: "run-1",
+        timeoutMs: expect.any(Number),
+      },
+      {
+        timeoutMs: expect.any(Number),
+        signal: undefined,
+      },
+    );
+    expect(submit).toHaveBeenCalledWith("call-1", {
+      result: EMPTY_FINAL_FALLBACK,
+    });
+  });
+
+  it.each([
+    {
+      waitResult: { runId: "run-1", status: "error", error: "provider authentication failed" },
+      expected: "provider authentication failed",
+    },
+    {
+      waitResult: {
+        runId: "run-1",
+        status: "timeout",
+        stopReason: "rpc",
+        error: "aborted by operator",
+      },
+      expected: "aborted by operator",
+    },
+    {
+      waitResult: {
+        runId: "run-1",
+        status: "timeout",
+        error: "preflight setup timed out",
+        timeoutPhase: "preflight",
+      },
+      expected: "preflight setup timed out",
+    },
+    {
+      waitResult: {
+        runId: "run-1",
+        status: "timeout",
+        error: "post-turn cleanup timed out",
+        timeoutPhase: "post_turn",
+      },
+      expected: "post-turn cleanup timed out",
+    },
+    {
+      waitResult: {
+        runId: "run-1",
+        status: "timeout",
+        stopReason: "timeout",
+        error: "agent runtime timeout",
+      },
+      expected: "agent runtime timeout",
+    },
+  ])("submits $expected from terminal empty-final waits", async ({ waitResult, expected }) => {
+    const listener = createMockAddEventListener();
+    const request = vi.fn(async (method: string) => {
+      if (method === "talk.client.toolCall") {
+        setImmediate(() => {
+          listener.emitChat(emptyFinalPayload("run-1"));
+        });
+        return {
+          runId: "run-1",
+          idempotencyKey: "run-1",
+          agentId: "main",
+          agentSessionKey: "agent:main:main",
+        };
+      }
+      if (method === "agent.wait") {
+        return waitResult;
+      }
+      throw new Error(`unexpected request: ${method}`);
+    });
+    const submit = vi.fn();
+
+    await submitRealtimeTalkConsult({
+      ctx: {
+        client: { request, addEventListener: listener.addEventListener },
+        sessionKey: "agent:main:main",
+        callbacks: {},
+      } as never,
+      callId: "call-1",
+      args: { question: "Check status" },
+      submit,
+    });
+
+    expect(submit).toHaveBeenCalledWith("call-1", { error: expected });
+  });
+
+  it("emits Talk progress from chat tool events while waiting for the consult result", async () => {
+    const listener = createMockAddEventListener();
+    const request = vi.fn(async (method: string) => {
+      if (method === "talk.client.toolCall") {
+        setImmediate(() => {
+          listener.emitChat({
+            runId: "run-1",
+            stream: "tool",
+            data: { phase: "start", name: "read", toolCallId: "tool-1" },
+          });
+          listener.emitChat({
+            runId: "run-1",
+            state: "final",
+            message: { text: "Done." },
+          });
+        });
+        return {
+          runId: "run-1",
+          idempotencyKey: "run-1",
+          agentId: "main",
+          agentSessionKey: "agent:main:main",
+        };
+      }
+      throw new Error(`unexpected request: ${method}`);
+    });
+    const emitTalkEvent = vi.fn();
+
+    await submitRealtimeTalkConsult({
+      ctx: {
+        client: { request, addEventListener: listener.addEventListener },
+        sessionKey: "agent:main:main",
+        callbacks: {},
+      } as never,
+      callId: "call-1",
+      args: { question: "Check files" },
+      submit: vi.fn(),
+      emitTalkEvent,
+    });
+
+    expect(emitTalkEvent).toHaveBeenCalledWith({
+      type: "tool.progress",
+      callId: "tool-1",
+      payload: { runId: "run-1", name: "read", phase: "start" },
+    });
+  });
+
+  it("submits a cancellation result when an active consult run is aborted", async () => {
+    const listener = createMockAddEventListener();
+    const request = vi.fn(async (method: string) => {
+      if (method === "talk.client.toolCall") {
+        setImmediate(() => {
+          listener.emitChat({
+            runId: "run-1",
+            state: "aborted",
+            errorMessage: "voice cancel",
+          });
+        });
+        return {
+          runId: "run-1",
+          idempotencyKey: "run-1",
+          agentId: "main",
+          agentSessionKey: "agent:main:main",
+        };
+      }
+      throw new Error(`unexpected request: ${method}`);
+    });
+    const submit = vi.fn();
+
+    await submitRealtimeTalkConsult({
+      ctx: {
+        client: { request, addEventListener: listener.addEventListener },
+        sessionKey: "agent:main:main",
+        callbacks: {},
+      } as never,
+      callId: "call-1",
+      args: { question: "Check files" },
+      submit,
+    });
+
+    expect(submit).toHaveBeenCalledWith("call-1", {
+      status: "cancelled",
+      message: "Cancelled the active OpenClaw run.",
+    });
+  });
+
+  it("routes active consult steering through Gateway control endpoints", async () => {
+    const listener = createMockAddEventListener();
+    const request = vi.fn(async () => ({
+      ok: true,
+      mode: "steer",
+      sessionKey: "agent:main:main",
+      active: true,
+      queued: true,
+      message: "Got it. I steered the active run.",
+      speak: true,
+      show: true,
+      suppress: false,
+    }));
+    const emitTalkEvent = vi.fn();
+
+    await steerRealtimeTalkActiveConsult({
+      ctx: {
+        client: { request, addEventListener: listener.addEventListener },
+        sessionKey: "agent:main:main",
+        callbacks: {},
+      } as never,
+      text: "use the safer path",
+      emitTalkEvent,
+    });
+
+    expect(request).toHaveBeenCalledWith("talk.client.steer", {
+      sessionKey: "agent:main:main",
+      text: "use the safer path",
+    });
+    expect(emitTalkEvent).toHaveBeenCalledWith({
+      type: "tool.progress",
+      payload: {
+        name: "openclaw_agent_control",
+        result: expect.objectContaining({ mode: "steer" }),
+      },
+      final: false,
+    });
+  });
+
+  it("speaks status and cancel acknowledgements when requested by active consult steering", async () => {
+    const listener = createMockAddEventListener();
+    const request = vi.fn(async () => ({
+      ok: true,
+      mode: "status",
+      sessionKey: "agent:main:main",
+      active: true,
+      message: "OpenClaw is working in read (running).",
+      speak: true,
+      show: true,
+      suppress: false,
+    }));
+    const speakControlResult = vi.fn();
+
+    await steerRealtimeTalkActiveConsult({
+      ctx: {
+        client: { request, addEventListener: listener.addEventListener },
+        sessionKey: "agent:main:main",
+        callbacks: {},
+      } as never,
+      text: "status",
+      speakControlResult,
+    });
+
+    expect(speakControlResult).toHaveBeenCalledWith(
+      expect.stringContaining('Status: "OpenClaw is working in read (running)."'),
+    );
+  });
+
+  it("can suppress cancel control speech while the original consult submits the cancel result", async () => {
+    const listener = createMockAddEventListener();
+    const request = vi.fn(async () => ({
+      ok: true,
+      mode: "cancel",
+      sessionKey: "agent:main:main",
+      active: true,
+      aborted: true,
+      message: "Cancelled the active OpenClaw run.",
+      speak: true,
+      show: true,
+      suppress: false,
+    }));
+    const speakControlResult = vi.fn();
+
+    await steerRealtimeTalkActiveConsult({
+      ctx: {
+        client: { request, addEventListener: listener.addEventListener },
+        sessionKey: "agent:main:main",
+        callbacks: {},
+      } as never,
+      text: "cancel that",
+      speakControlResult,
+      suppressSpeechForModes: ["cancel"],
+    });
+
+    expect(request).toHaveBeenCalledWith("talk.client.steer", {
+      sessionKey: "agent:main:main",
+      text: "cancel that",
+    });
+    expect(speakControlResult).not.toHaveBeenCalled();
+  });
+
+  it("speaks legacy suppressed steer acknowledgements instead of leaving voice silent", async () => {
+    const listener = createMockAddEventListener();
+    const request = vi.fn(async () => ({
+      ok: true,
+      mode: "steer",
+      sessionKey: "agent:main:main",
+      active: true,
+      queued: true,
+      message: "Got it. I steered the active run.",
+      speak: false,
+      show: true,
+      suppress: true,
+    }));
+    const speakControlResult = vi.fn();
+
+    await steerRealtimeTalkActiveConsult({
+      ctx: {
+        client: { request, addEventListener: listener.addEventListener },
+        sessionKey: "agent:main:main",
+        callbacks: {},
+      } as never,
+      text: "use the safer path",
+      speakControlResult,
+    });
+
+    expect(speakControlResult).toHaveBeenCalledWith(
+      expect.stringContaining('Status: "Got it. I steered the active run."'),
+    );
+  });
+
+  it("does not resolve empty-final fallback when agent.wait returns pending", async () => {
+    vi.useFakeTimers();
+    try {
+      const listener = createMockAddEventListener();
+      const request = vi.fn(async (method: string) => {
+        if (method === "talk.client.toolCall") {
+          window.setTimeout(() => {
+            listener.emitChat(emptyFinalPayload("run-1"));
+          }, 0);
+          return {
+            runId: "run-1",
+            idempotencyKey: "run-1",
+            agentId: "main",
+            agentSessionKey: "agent:main:main",
+          };
+        }
+        if (method === "agent.wait") {
+          return pendingWithFollowup("run-1", "run-2");
+        }
+        throw new Error(`unexpected request: ${method}`);
+      });
+      const submit = vi.fn();
+
+      const consult = submitRealtimeTalkConsult({
+        ctx: {
+          client: { request, addEventListener: listener.addEventListener },
+          sessionKey: "agent:main:main",
+          callbacks: {},
+        } as never,
+        callId: "call-1",
+        args: { question: "Check status" },
+        submit,
+      });
+
+      // agent.wait resolves with pending — acceptedFollowupRunId is set
+      await vi.advanceTimersByTimeAsync(1);
+      expect(submit).not.toHaveBeenCalled();
+
+      // Queued follow-up (followupRunId) delivers text — should submit
+      window.setTimeout(() => {
+        listener.emitChat(textFinalPayload("run-2", "Queued answer."));
+      }, 0);
+      await vi.advanceTimersByTimeAsync(1);
+      await consult;
+
+      expect(submit).toHaveBeenCalledWith("call-1", {
+        result: "Queued answer.",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
+
+  it("bounds delayed follow-up observation to the original deadline and abort signal", async () => {
+    vi.useFakeTimers();
+    try {
+      const listener = createMockAddEventListener();
+      const controller = new AbortController();
+      const waitCalls: Array<{
+        runId?: unknown;
+        timeoutMs?: unknown;
+        signal?: unknown;
+      }> = [];
+      const request = vi.fn(
+        async (
+          method: string,
+          input?: { runId?: string; timeoutMs?: number },
+          options?: { signal?: AbortSignal; timeoutMs?: number },
+        ) => {
+          if (method === "talk.client.toolCall") {
+            window.setTimeout(() => {
+              listener.emitChat(emptyFinalPayload("run-1"));
+            }, 10_000);
+            return {
+              runId: "run-1",
+              idempotencyKey: "run-1",
+              agentId: "main",
+              agentSessionKey: "agent:main:main",
+            };
+          }
+          if (method === "agent.wait") {
+            waitCalls.push({
+              ...input,
+              timeoutMs: options?.timeoutMs ?? input?.timeoutMs,
+              signal: options?.signal,
+            });
+            if (input?.runId === "run-1") {
+              if (waitCalls.length === 1) {
+                return pendingWithoutFollowup("run-1");
+              }
+              return pendingWithFollowup("run-1", "run-delayed");
+            }
+            if (input?.runId === "run-delayed") {
+              return pendingWithFollowup("run-1", "run-delayed");
+            }
+            throw new Error(`unexpected agent.wait runId: ${String(input?.runId)}`);
+          }
+          throw new Error(`unexpected request: ${method}`);
+        },
+      );
+      const submit = vi.fn();
+
+      const consult = submitRealtimeTalkConsult({
+        ctx: {
+          client: { request, addEventListener: listener.addEventListener },
+          sessionKey: "agent:main:main",
+          callbacks: {},
+        } as never,
+        callId: "call-1",
+        args: { question: "Check status" },
+        submit,
+        signal: controller.signal,
+      });
+
+      await vi.advanceTimersByTimeAsync(10_001);
+      expect(waitCalls).toEqual([
+        { runId: "run-1", timeoutMs: 110_000, signal: controller.signal },
+      ]);
+
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(waitCalls).toHaveLength(3);
+      expect(waitCalls[1]).toEqual({
+        runId: "run-1",
+        timeoutMs: 108_000,
+        signal: controller.signal,
+      });
+      expect(waitCalls[2]).toEqual({
+        runId: "run-delayed",
+        timeoutMs: 108_000,
+        signal: controller.signal,
+      });
+
+      listener.emitChat(textFinalPayload("run-delayed", "Delayed queued answer."));
+      await vi.advanceTimersByTimeAsync(1);
+      await consult;
+      await vi.advanceTimersByTimeAsync(2000);
+
+      expect(waitCalls).toHaveLength(3);
+      expect(submit).toHaveBeenCalledWith("call-1", {
+        result: "Delayed queued answer.",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
+
+  it("surfaces a canonical timeout from delayed follow-up observation", async () => {
+    vi.useFakeTimers();
+    try {
+      const listener = createMockAddEventListener();
+      let agentWaitCalls = 0;
+      const request = vi.fn(async (method: string) => {
+        if (method === "talk.client.toolCall") {
+          window.setTimeout(() => {
+            listener.emitChat(emptyFinalPayload("run-1"));
+          }, 0);
+          return {
+            runId: "run-1",
+            idempotencyKey: "run-1",
+            agentId: "main",
+            agentSessionKey: "agent:main:main",
+          };
+        }
+        if (method === "agent.wait") {
+          agentWaitCalls += 1;
+          if (agentWaitCalls === 1) {
+            return pendingWithoutFollowup("run-1");
+          }
+          return {
+            runId: "run-1",
+            status: "timeout" as const,
+            endedAt: Date.now(),
+          };
+        }
+        throw new Error(`unexpected request: ${method}`);
+      });
+      const submit = vi.fn();
+
+      const consult = submitRealtimeTalkConsult({
+        ctx: {
+          client: { request, addEventListener: listener.addEventListener },
+          sessionKey: "agent:main:main",
+          callbacks: {},
+        } as never,
+        callId: "call-1",
+        args: { question: "Check status" },
+        submit,
+      });
+
+      await vi.advanceTimersByTimeAsync(2001);
+      await consult;
+
+      expect(agentWaitCalls).toBe(2);
+      expect(submit).toHaveBeenCalledWith("call-1", {
+        error: "OpenClaw follow-up observation timed out",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
+
+  it("surfaces a canonical error from delayed follow-up observation", async () => {
+    vi.useFakeTimers();
+    try {
+      const listener = createMockAddEventListener();
+      const controller = new AbortController();
+      let agentWaitCalls = 0;
+      const request = vi.fn(
+        async (
+          method: string,
+          _input?: unknown,
+          options?: { signal?: AbortSignal; timeoutMs?: number },
+        ) => {
+          if (method === "talk.client.toolCall") {
+            window.setTimeout(() => {
+              listener.emitChat(emptyFinalPayload("run-1"));
+            }, 0);
+            return {
+              runId: "run-1",
+              idempotencyKey: "run-1",
+              agentId: "main",
+              agentSessionKey: "agent:main:main",
+            };
+          }
+          if (method === "agent.wait") {
+            agentWaitCalls += 1;
+            if (agentWaitCalls === 1) {
+              return pendingWithoutFollowup("run-1");
+            }
+            expect(options).toMatchObject({
+              signal: controller.signal,
+              timeoutMs: 118_000,
+            });
+            return {
+              runId: "run-1",
+              status: "error" as const,
+              error: "agent run aborted",
+              endedAt: Date.now(),
+            };
+          }
+          throw new Error(`unexpected request: ${method}`);
+        },
+      );
+      const submit = vi.fn();
+
+      const consult = submitRealtimeTalkConsult({
+        ctx: {
+          client: { request, addEventListener: listener.addEventListener },
+          sessionKey: "agent:main:main",
+          callbacks: {},
+        } as never,
+        callId: "call-1",
+        args: { question: "Check status" },
+        submit,
+        signal: controller.signal,
+      });
+
+      await vi.advanceTimersByTimeAsync(2001);
+      await consult;
+
+      expect(agentWaitCalls).toBe(2);
+      expect(submit).toHaveBeenCalledWith("call-1", {
+        error: "agent run aborted",
+      });
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(agentWaitCalls).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
+
+  it("does not resume follow-up observation after an in-flight request is stopped", async () => {
+    vi.useFakeTimers();
+    try {
+      const listener = createMockAddEventListener();
+      const controller = new AbortController();
+      const observerReply = createDeferred<{ runId: string; status: "pending" }>();
+      const waitCalls: Array<{ runId?: unknown; timeoutMs?: unknown }> = [];
+      const request = vi.fn(
+        async (method: string, input?: { runId?: string; timeoutMs?: number }) => {
+          if (method === "talk.client.toolCall") {
+            window.setTimeout(() => {
+              listener.emitChat(emptyFinalPayload("run-1"));
+            }, 0);
+            return {
+              runId: "run-1",
+              idempotencyKey: "run-1",
+              agentId: "main",
+              agentSessionKey: "agent:main:main",
+            };
+          }
+          if (method === "agent.wait") {
+            waitCalls.push(input ?? {});
+            if (waitCalls.length === 1) {
+              return pendingWithoutFollowup("run-1");
+            }
+            return observerReply.promise;
+          }
+          throw new Error(`unexpected request: ${method}`);
+        },
+      );
+      const submit = vi.fn();
+      const consult = submitRealtimeTalkConsult({
+        ctx: {
+          client: { request, addEventListener: listener.addEventListener },
+          sessionKey: "agent:main:main",
+          callbacks: {},
+        } as never,
+        callId: "call-1",
+        args: { question: "Check status" },
+        submit,
+        signal: controller.signal,
+      });
+
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(waitCalls).toHaveLength(2);
+
+      controller.abort();
+      await consult;
+      observerReply.resolve(pendingWithoutFollowup("run-1"));
+      await vi.advanceTimersByTimeAsync(2000);
+
+      expect(waitCalls).toHaveLength(2);
+      expect(submit).toHaveBeenCalledWith("call-1", {
+        status: "cancelled",
+        message: "Cancelled the active OpenClaw run.",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
+
+  it("captures queued follow-up final reply with a different runId", async () => {
+    vi.useFakeTimers();
+    try {
+      const listener = createMockAddEventListener();
+      const request = vi.fn(async (method: string) => {
+        if (method === "talk.client.toolCall") {
+          window.setTimeout(() => {
+            listener.emitChat(emptyFinalPayload("run-1"));
+          }, 0);
+          return {
+            runId: "run-1",
+            idempotencyKey: "run-1",
+            agentId: "main",
+            agentSessionKey: "agent:main:main",
+          };
+        }
+        if (method === "agent.wait") {
+          return pendingWithFollowup("run-1", "run-2");
+        }
+        throw new Error(`unexpected request: ${method}`);
+      });
+      const submit = vi.fn();
+
+      const consult = submitRealtimeTalkConsult({
+        ctx: {
+          client: { request, addEventListener: listener.addEventListener },
+          sessionKey: "agent:main:main",
+          callbacks: {},
+        } as never,
+        callId: "call-1",
+        args: { question: "Check status" },
+        submit,
+      });
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(submit).not.toHaveBeenCalled();
+
+      window.setTimeout(() => {
+        listener.emitChat(textFinalPayload("run-2", "Adopted run reply."));
+      }, 0);
+      await vi.advanceTimersByTimeAsync(1);
+      await consult;
+
+      expect(submit).toHaveBeenCalledWith("call-1", {
+        result: "Adopted run reply.",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
+
+  it("falls back to no-text when adopted run delivers empty final", async () => {
+    vi.useFakeTimers();
+    try {
+      const listener = createMockAddEventListener();
+      const request = vi.fn(async (method: string) => {
+        if (method === "talk.client.toolCall") {
+          window.setTimeout(() => {
+            listener.emitChat(emptyFinalPayload("run-1"));
+          }, 0);
+          return {
+            runId: "run-1",
+            idempotencyKey: "run-1",
+            agentId: "main",
+            agentSessionKey: "agent:main:main",
+          };
+        }
+        if (method === "agent.wait") {
+          return pendingWithFollowup("run-1", "run-2");
+        }
+        throw new Error(`unexpected request: ${method}`);
+      });
+      const submit = vi.fn();
+
+      const consult = submitRealtimeTalkConsult({
+        ctx: {
+          client: { request, addEventListener: listener.addEventListener },
+          sessionKey: "agent:main:main",
+          callbacks: {},
+        } as never,
+        callId: "call-1",
+        args: { question: "Check status" },
+        submit,
+      });
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(submit).not.toHaveBeenCalled();
+
+      // Queued follow-up delivers empty final — should fall back to no-text
+      window.setTimeout(() => {
+        listener.emitChat(emptyFinalPayload("run-2"));
+      }, 0);
+      await vi.advanceTimersByTimeAsync(1);
+
+      // Grace period timer fires
+      await vi.advanceTimersByTimeAsync(500);
+      await consult;
+
+      expect(submit).toHaveBeenCalledWith("call-1", {
+        result: EMPTY_FINAL_FALLBACK,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
+
+  it("rejects chat events with runId unrelated to the queued follow-up", async () => {
+    vi.useFakeTimers();
+    try {
+      const listener = createMockAddEventListener();
+      const request = vi.fn(async (method: string) => {
+        if (method === "talk.client.toolCall") {
+          window.setTimeout(() => {
+            listener.emitChat(emptyFinalPayload("run-1"));
+          }, 0);
+          return {
+            runId: "run-1",
+            idempotencyKey: "run-1",
+            agentId: "main",
+            agentSessionKey: "agent:main:main",
+          };
+        }
+        if (method === "agent.wait") {
+          return pendingWithFollowup("run-1", "run-2");
+        }
+        throw new Error(`unexpected request: ${method}`);
+      });
+      const submit = vi.fn();
+
+      const consultPromise = submitRealtimeTalkConsult({
+        ctx: {
+          client: { request, addEventListener: listener.addEventListener },
+          sessionKey: "agent:main:main",
+          callbacks: {},
+        } as never,
+        callId: "call-1",
+        args: { question: "Check status" },
+        submit,
+      });
+
+      // agent.wait resolves with pending and followupRunId
+      await vi.advanceTimersByTimeAsync(1);
+      expect(submit).not.toHaveBeenCalled();
+
+      // An unrelated runId should be ignored — no resolution
+      window.setTimeout(() => {
+        listener.emitChat({
+          runId: "unrelated-run-id",
+          state: "final",
+          message: { text: "Should be ignored." },
+        });
+      }, 0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(submit).not.toHaveBeenCalled();
+
+      // The legitimate follow-up runId still resolves correctly
+      window.setTimeout(() => {
+        listener.emitChat(textFinalPayload("run-2", "Follow-up answer."));
+      }, 0);
+      await vi.advanceTimersByTimeAsync(1);
+      await consultPromise;
+
+      expect(submit).toHaveBeenCalledWith("call-1", {
+        result: "Follow-up answer.",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
+
+  it("retries a pending follow-up recovery until the terminal snapshot arrives", async () => {
+    vi.useFakeTimers();
+    try {
+      const listener = createMockAddEventListener();
+      const waitCalls: Array<{ runId?: unknown; timeoutMs?: unknown }> = [];
+      const request = vi.fn(
+        async (method: string, input?: { runId?: string; timeoutMs?: number }) => {
+          if (method === "talk.client.toolCall") {
+            window.setTimeout(() => {
+              listener.emitChat(emptyFinalPayload("run-1"));
+            }, 0);
+            return {
+              runId: "run-1",
+              idempotencyKey: "run-1",
+              agentId: "main",
+              agentSessionKey: "agent:main:main",
+            };
+          }
+          if (method === "agent.wait") {
+            waitCalls.push(input ?? {});
+            if (input?.runId === "run-1") {
+              return terminalWithFollowup("run-1", "run-delayed", {
+                disposition: "visible",
+                text: "Pending follow-up answer.",
+              });
+            }
+            if (input?.runId === "run-delayed") {
+              if (waitCalls.length === 2) {
+                return pendingWithFollowup("run-1", "run-delayed");
+              }
+              return {
+                runId: "run-delayed",
+                status: "ok" as const,
+                terminalReply: {
+                  disposition: "visible" as const,
+                  text: "Pending follow-up answer.",
+                },
+              };
+            }
+            throw new Error(`unexpected agent.wait runId: ${String(input?.runId)}`);
+          }
+          throw new Error(`unexpected request: ${method}`);
+        },
+      );
+      const submit = vi.fn();
+
+      const consult = submitRealtimeTalkConsult({
+        ctx: {
+          client: { request, addEventListener: listener.addEventListener },
+          sessionKey: "agent:main:main",
+          callbacks: {},
+        } as never,
+        callId: "call-1",
+        args: { question: "Check status" },
+        submit,
+      });
+
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(waitCalls).toEqual([
+        { runId: "run-1", timeoutMs: 120_000 },
+        { runId: "run-delayed", timeoutMs: 120_000 },
+      ]);
+
+      await vi.advanceTimersByTimeAsync(2000);
+      await consult;
+
+      expect(waitCalls).toHaveLength(3);
+      expect(waitCalls[2]).toEqual({
+        runId: "run-delayed",
+        timeoutMs: 118_000,
+      });
+      expect(submit).toHaveBeenCalledWith("call-1", {
+        result: "Pending follow-up answer.",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
+
+  it("clears a pending recovery retry when a follow-up event settles", async () => {
+    vi.useFakeTimers();
+    try {
+      const listener = createMockAddEventListener();
+      const waitCalls: Array<{ runId?: unknown; timeoutMs?: unknown }> = [];
+      const request = vi.fn(
+        async (method: string, input?: { runId?: string; timeoutMs?: number }) => {
+          if (method === "talk.client.toolCall") {
+            window.setTimeout(() => {
+              listener.emitChat(emptyFinalPayload("run-1"));
+            }, 0);
+            return {
+              runId: "run-1",
+              idempotencyKey: "run-1",
+              agentId: "main",
+              agentSessionKey: "agent:main:main",
+            };
+          }
+          if (method === "agent.wait") {
+            waitCalls.push(input ?? {});
+            if (input?.runId === "run-1") {
+              return terminalWithFollowup("run-1", "run-2", {
+                disposition: "visible",
+                text: "Queued answer wins.",
+              });
+            }
+            if (input?.runId === "run-2") {
+              return pendingWithFollowup("run-1", "run-2");
+            }
+            throw new Error(`unexpected agent.wait runId: ${String(input?.runId)}`);
+          }
+          throw new Error(`unexpected request: ${method}`);
+        },
+      );
+      const submit = vi.fn();
+
+      const consult = submitRealtimeTalkConsult({
+        ctx: {
+          client: { request, addEventListener: listener.addEventListener },
+          sessionKey: "agent:main:main",
+          callbacks: {},
+        } as never,
+        callId: "call-1",
+        args: { question: "Check status" },
+        submit,
+      });
+
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(waitCalls).toEqual([
+        { runId: "run-1", timeoutMs: 120_000 },
+        { runId: "run-2", timeoutMs: 120_000 },
+      ]);
+
+      listener.emitChat(textFinalPayload("run-2", "Queued answer wins."));
+      await consult;
+      await vi.advanceTimersByTimeAsync(2000);
+
+      expect(waitCalls).toHaveLength(2);
+      expect(submit).toHaveBeenCalledWith("call-1", { result: "Queued answer wins." });
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
+
+  it("aborts before a pending recovery retry is scheduled", async () => {
+    vi.useFakeTimers();
+    try {
+      const listener = createMockAddEventListener();
+      const waitCalls: Array<{ runId?: unknown; timeoutMs?: unknown }> = [];
+      const request = vi.fn(
+        async (method: string, input?: { runId?: string; timeoutMs?: number }) => {
+          if (method === "talk.client.toolCall") {
+            window.setTimeout(() => {
+              listener.emitChat(emptyFinalPayload("run-1"));
+            }, 0);
+            return {
+              runId: "run-1",
+              idempotencyKey: "run-1",
+              agentId: "main",
+              agentSessionKey: "agent:main:main",
+            };
+          }
+          if (method === "agent.wait") {
+            waitCalls.push(input ?? {});
+            if (input?.runId === "run-1") {
+              return terminalWithFollowup("run-1", "run-2", {
+                disposition: "visible",
+                text: "Queued answer.",
+              });
+            }
+            if (input?.runId === "run-2") {
+              return pendingWithFollowup("run-1", "run-2");
+            }
+            throw new Error(`unexpected agent.wait runId: ${String(input?.runId)}`);
+          }
+          throw new Error(`unexpected request: ${method}`);
+        },
+      );
+      const controller = new AbortController();
+      const submit = vi.fn();
+      const consult = submitRealtimeTalkConsult({
+        ctx: {
+          client: { request, addEventListener: listener.addEventListener },
+          sessionKey: "agent:main:main",
+          callbacks: {},
+        } as never,
+        callId: "call-1",
+        args: { question: "Check status" },
+        submit,
+        signal: controller.signal,
+      });
+
+      await vi.advanceTimersByTimeAsync(1);
+      await vi.advanceTimersByTimeAsync(0);
+      controller.abort();
+      await consult;
+
+      expect(waitCalls).toHaveLength(2);
+      expect(submit).toHaveBeenCalledWith("call-1", {
+        status: "cancelled",
+        message: "Cancelled the active OpenClaw run.",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
+
+  it("submits a terminal error from follow-up recovery", async () => {
+    vi.useFakeTimers();
+    try {
+      const listener = createMockAddEventListener();
+      const request = vi.fn(
+        async (method: string, input?: { runId?: string; timeoutMs?: number }) => {
+          if (method === "talk.client.toolCall") {
+            window.setTimeout(() => {
+              listener.emitChat(emptyFinalPayload("run-1"));
+            }, 0);
+            return {
+              runId: "run-1",
+              idempotencyKey: "run-1",
+              agentId: "main",
+              agentSessionKey: "agent:main:main",
+            };
+          }
+          if (method === "agent.wait") {
+            if (input?.runId === "run-1") {
+              return terminalWithFollowup("run-1", "run-2", {
+                disposition: "visible",
+                text: "Queued answer.",
+              });
+            }
+            if (input?.runId === "run-2") {
+              return { runId: "run-2", status: "error" as const, error: "Follow-up failed." };
+            }
+            throw new Error(`unexpected agent.wait runId: ${String(input?.runId)}`);
+          }
+          throw new Error(`unexpected request: ${method}`);
+        },
+      );
+      const submit = vi.fn();
+      const consult = submitRealtimeTalkConsult({
+        ctx: {
+          client: { request, addEventListener: listener.addEventListener },
+          sessionKey: "agent:main:main",
+          callbacks: {},
+        } as never,
+        callId: "call-1",
+        args: { question: "Check status" },
+        submit,
+      });
+
+      await vi.advanceTimersByTimeAsync(1);
+      await consult;
+
+      expect(submit).toHaveBeenCalledWith("call-1", { error: "Follow-up failed." });
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
+
+  it("discovers a follow-up when the original wait times out with its runId", async () => {
+    vi.useFakeTimers();
+    try {
+      const listener = createMockAddEventListener();
+      const waitCalls: Array<{ runId?: unknown; timeoutMs?: unknown }> = [];
+      const request = vi.fn(
+        async (method: string, input?: { runId?: string; timeoutMs?: number }) => {
+          if (method === "talk.client.toolCall") {
+            window.setTimeout(() => {
+              listener.emitChat(emptyFinalPayload("run-1"));
+            }, 0);
+            return {
+              runId: "run-1",
+              idempotencyKey: "run-1",
+              agentId: "main",
+              agentSessionKey: "agent:main:main",
+            };
+          }
+          if (method === "agent.wait") {
+            waitCalls.push(input ?? {});
+            if (input?.runId === "run-1") {
+              return timeoutWithFollowup("run-1", "run-2");
+            }
+            if (input?.runId === "run-2") {
+              return {
+                runId: "run-2",
+                status: "ok" as const,
+                terminalReply: {
+                  disposition: "visible" as const,
+                  text: "Queued answer.",
+                },
+              };
+            }
+            throw new Error(`unexpected agent.wait runId: ${String(input?.runId)}`);
+          }
+          throw new Error(`unexpected request: ${method}`);
+        },
+      );
+      const submit = vi.fn();
+      const consult = submitRealtimeTalkConsult({
+        ctx: {
+          client: { request, addEventListener: listener.addEventListener },
+          sessionKey: "agent:main:main",
+          callbacks: {},
+        } as never,
+        callId: "call-1",
+        args: { question: "Check status" },
+        submit,
+      });
+
+      await vi.advanceTimersByTimeAsync(1);
+      await consult;
+
+      expect(waitCalls.map((call) => call.runId)).toEqual(["run-1", "run-2"]);
+      expect(submit).toHaveBeenCalledWith("call-1", { result: "Queued answer." });
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
+
+  it("recovers when buffered replay contains only unrelated terminal events", async () => {
+    vi.useFakeTimers();
+    try {
+      const listener = createMockAddEventListener();
+      const waitCalls: Array<{ runId?: unknown; timeoutMs?: unknown }> = [];
+      const request = vi.fn(
+        async (method: string, input?: { runId?: string; timeoutMs?: number }) => {
+          if (method === "talk.client.toolCall") {
+            window.setTimeout(() => {
+              listener.emitChat(emptyFinalPayload("run-1"));
+              listener.emitChat(textFinalPayload("run-unrelated", "Unrelated answer."));
+            }, 0);
+            return {
+              runId: "run-1",
+              idempotencyKey: "run-1",
+              agentId: "main",
+              agentSessionKey: "agent:main:main",
+            };
+          }
+          if (method === "agent.wait") {
+            waitCalls.push(input ?? {});
+            if (input?.runId === "run-1") {
+              return terminalWithFollowup("run-1", "run-2", {
+                disposition: "visible",
+                text: "Queued answer.",
+              });
+            }
+            if (input?.runId === "run-2") {
+              return {
+                runId: "run-2",
+                status: "ok" as const,
+                terminalReply: {
+                  disposition: "visible" as const,
+                  text: "Queued answer.",
+                },
+              };
+            }
+            throw new Error(`unexpected agent.wait runId: ${String(input?.runId)}`);
+          }
+          throw new Error(`unexpected request: ${method}`);
+        },
+      );
+      const submit = vi.fn();
+      const consult = submitRealtimeTalkConsult({
+        ctx: {
+          client: { request, addEventListener: listener.addEventListener },
+          sessionKey: "agent:main:main",
+          callbacks: {},
+        } as never,
+        callId: "call-1",
+        args: { question: "Check status" },
+        submit,
+      });
+
+      await vi.advanceTimersByTimeAsync(1);
+      await consult;
+
+      expect(waitCalls.map((call) => call.runId)).toEqual(["run-1", "run-2"]);
+      expect(submit).toHaveBeenCalledWith("call-1", { result: "Queued answer." });
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
+
+  it("submits a timeout from follow-up recovery instead of using the empty fallback", async () => {
+    vi.useFakeTimers();
+    try {
+      const listener = createMockAddEventListener();
+      const request = vi.fn(
+        async (method: string, input?: { runId?: string; timeoutMs?: number }) => {
+          if (method === "talk.client.toolCall") {
+            window.setTimeout(() => {
+              listener.emitChat(emptyFinalPayload("run-1"));
+            }, 0);
+            return {
+              runId: "run-1",
+              idempotencyKey: "run-1",
+              agentId: "main",
+              agentSessionKey: "agent:main:main",
+            };
+          }
+          if (method === "agent.wait") {
+            if (input?.runId === "run-1") {
+              return terminalWithFollowup("run-1", "run-2", {
+                disposition: "visible",
+                text: "Queued answer.",
+              });
+            }
+            if (input?.runId === "run-2") {
+              return { runId: "run-2", status: "timeout" as const };
+            }
+            throw new Error(`unexpected agent.wait runId: ${String(input?.runId)}`);
+          }
+          throw new Error(`unexpected request: ${method}`);
+        },
+      );
+      const submit = vi.fn();
+      const consult = submitRealtimeTalkConsult({
+        ctx: {
+          client: { request, addEventListener: listener.addEventListener },
+          sessionKey: "agent:main:main",
+          callbacks: {},
+        } as never,
+        callId: "call-1",
+        args: { question: "Check status" },
+        submit,
+      });
+
+      await vi.advanceTimersByTimeAsync(1);
+      await consult;
+
+      expect(submit).toHaveBeenCalledWith("call-1", {
+        error: "OpenClaw tool call timed out",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
+
+  it("recovers a discarded terminal reply from the discovered follow-up run", async () => {
+    vi.useFakeTimers();
+    try {
+      const listener = createMockAddEventListener();
+      const waitCalls: Array<{ runId?: unknown; timeoutMs?: unknown }> = [];
+      const request = vi.fn(
+        async (method: string, input?: { runId?: string; timeoutMs?: number }) => {
+          if (method === "talk.client.toolCall") {
+            window.setTimeout(() => {
+              listener.emitChat(emptyFinalPayload("run-1"));
+              listener.emitChat({
+                runId: "run-followup-lost",
+                state: "final",
+                message: { text: "x".repeat(70_000) },
+              });
+            }, 0);
+            return {
+              runId: "run-1",
+              idempotencyKey: "run-1",
+              agentId: "main",
+              agentSessionKey: "agent:main:main",
+            };
+          }
+          if (method === "agent.wait") {
+            waitCalls.push(input ?? {});
+            if (input?.runId === "run-1") {
+              return terminalWithFollowup("run-1", "run-followup-lost", {
+                disposition: "visible",
+                text: "Recovered from Gateway snapshot.",
+              });
+            }
+            if (input?.runId === "run-followup-lost") {
+              return {
+                runId: "run-followup-lost",
+                status: "ok" as const,
+                terminalReply: {
+                  disposition: "visible" as const,
+                  text: "Recovered from Gateway snapshot.",
+                },
+              };
+            }
+            throw new Error(`unexpected agent.wait runId: ${String(input?.runId)}`);
+          }
+          throw new Error(`unexpected request: ${method}`);
+        },
+      );
+      const submit = vi.fn();
+
+      const consult = submitRealtimeTalkConsult({
+        ctx: {
+          client: { request, addEventListener: listener.addEventListener },
+          sessionKey: "agent:main:main",
+          callbacks: {},
+        } as never,
+        callId: "call-1",
+        args: { question: "Check status" },
+        submit,
+      });
+
+      await vi.advanceTimersByTimeAsync(1);
+      await consult;
+
+      expect(waitCalls).toEqual([
+        { runId: "run-1", timeoutMs: 120_000 },
+        expect.objectContaining({ runId: "run-followup-lost", timeoutMs: expect.any(Number) }),
+      ]);
+      expect(waitCalls[1]?.timeoutMs).toBeLessThanOrEqual(120_000);
+      expect(submit).toHaveBeenCalledWith("call-1", {
+        result: "Recovered from Gateway snapshot.",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  }, 15_000);
+});
