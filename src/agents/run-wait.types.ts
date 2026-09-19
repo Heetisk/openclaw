@@ -15,6 +15,7 @@ export type AgentWaitResult = {
   pendingError?: boolean;
   timeoutPhase?: AgentRunTimeoutPhase;
   providerStarted?: boolean;
+  followupRunId?: string;
   terminalReply?: AgentRunTerminalReplySnapshot;
   sourceReplyDelivered?: true;
 };

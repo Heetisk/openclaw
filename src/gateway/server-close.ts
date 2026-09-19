@@ -535,6 +535,7 @@ export async function completeGatewayClose(
       await shutdownStep("task-unsub", () => params.taskUnsub!(), warnings);
     }
     params.chatRunState.clear();
+    params.retiredFollowupRunIds.clear();
     let clientCloseFailures = 0;
     for (const c of params.clients) {
       try {

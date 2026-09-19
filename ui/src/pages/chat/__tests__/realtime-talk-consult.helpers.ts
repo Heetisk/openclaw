@@ -1,4 +1,5 @@
 import { vi } from "vitest";
+import type { AgentRunTerminalReplySnapshot } from "../../../../../src/agents/agent-run-terminal-reply.js";
 
 /** Install a mock addEventListener that captures the chat event listener.
  * Returns the listener setter so tests can emit events.
@@ -43,6 +44,17 @@ export function pendingWithoutFollowup(runId: string) {
  */
 export function terminalOk(runId: string) {
   return { runId, status: "ok" as const };
+}
+
+/**
+ * Create a terminal agent.wait response that carries a retired follow-up runId.
+ */
+export function terminalWithFollowup(
+  runId: string,
+  followupRunId: string,
+  terminalReply: AgentRunTerminalReplySnapshot,
+) {
+  return { runId, status: "ok" as const, followupRunId, terminalReply };
 }
 
 /**

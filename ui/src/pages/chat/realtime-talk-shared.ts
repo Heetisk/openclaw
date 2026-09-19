@@ -183,6 +183,7 @@ function resolveRealtimeTalkEventSessionId(
 
 const EMPTY_FINAL_FALLBACK_GRACE_MS = 500;
 const EMPTY_FINAL_FALLBACK_TEXT = "OpenClaw finished with no text.";
+const FOLLOWUP_RECOVERY_RETRY_INTERVAL_MS = 2000;
 
 function extractTextFromMessage(message: unknown): string {
   if (!message || typeof message !== "object") {
@@ -226,7 +227,6 @@ function getTerminalAgentWaitError(result: AgentWaitResult | undefined): Error |
   const hasTerminalTimeoutMetadata =
     result.endedAt !== undefined ||
     message !== undefined ||
-    result.aborted === true ||
     (livenessState !== undefined && livenessState.length > 0) ||
     result.yielded === true ||
     (stopReason !== undefined && stopReason.length > 0) ||
@@ -255,7 +255,10 @@ function waitForChatResult(params: {
     let settled = false;
     let emptyFinalWaitStarted = false;
     let emptyFinalFallbackTimer: number | undefined;
+    let followupRecoveryStarted = false;
+    let followupRecoveryRetryTimer: number | undefined;
     let observePendingFollowupRunIdAbort = () => {};
+    const waitStartedAt = Date.now();
 
     const settleResolve = (value: string) => {
       if (settled) {
@@ -305,6 +308,74 @@ function waitForChatResult(params: {
       }
     };
 
+    const requestFollowupReply = (followupRunId: string) => {
+      const remainingTimeoutMs = params.timeoutMs - (Date.now() - waitStartedAt);
+      if (remainingTimeoutMs <= 0) {
+        settleReject(new Error("OpenClaw tool call timed out"));
+        return;
+      }
+      void params.client
+        .request<AgentWaitResult>(
+          "agent.wait",
+          {
+            runId: followupRunId,
+            timeoutMs: remainingTimeoutMs,
+          },
+          {
+            signal: params.signal,
+          },
+        )
+        .then((result) => {
+          if (settled) {
+            return;
+          }
+          const waitError = getTerminalAgentWaitError(result);
+          if (waitError) {
+            settleReject(waitError);
+            return;
+          }
+          if (result?.status === "timeout") {
+            settleReject(new Error(result.error?.trim() || "OpenClaw tool call timed out"));
+            return;
+          }
+          if (result?.terminalReply?.disposition === "visible") {
+            settleResolve(result.terminalReply.text);
+            return;
+          }
+          if (result?.status === "pending") {
+            const retryRemainingTimeoutMs = params.timeoutMs - (Date.now() - waitStartedAt);
+            if (retryRemainingTimeoutMs <= 0) {
+              settleReject(new Error("OpenClaw tool call timed out"));
+              return;
+            }
+            followupRecoveryRetryTimer = window.setTimeout(
+              () => {
+                followupRecoveryRetryTimer = undefined;
+                requestFollowupReply(followupRunId);
+              },
+              Math.min(FOLLOWUP_RECOVERY_RETRY_INTERVAL_MS, retryRemainingTimeoutMs),
+            );
+            return;
+          }
+          // Empty and silent terminal replies use the same grace window as an
+          // empty chat final, allowing a later source-reply event to win.
+          emptyFinalFallbackTimer = window.setTimeout(() => {
+            settleResolve(EMPTY_FINAL_FALLBACK_TEXT);
+          }, EMPTY_FINAL_FALLBACK_GRACE_MS);
+        })
+        .catch((error: unknown) => {
+          settleReject(error instanceof Error ? error : new Error(String(error)));
+        });
+    };
+
+    const recoverFollowupReply = (followupRunId: string) => {
+      if (followupRecoveryStarted || settled) {
+        return;
+      }
+      followupRecoveryStarted = true;
+      requestFollowupReply(followupRunId);
+    };
+
     /** Set the discovered follow-up runId on the handler and replay any
      * buffered events that arrived before discovery, recovering terminal
      * results (final, aborted, error) that would otherwise be lost. */
@@ -316,19 +387,10 @@ function waitForChatResult(params: {
       }
       // If the buffer was evicted before discovery (oversized terminal event
       // dropped, or older events evicted by aggregate pressure), replaying
-      // finds nothing and the consultation would otherwise wait until its
-      // 120-second timeout. Issue one recovery poll against the Gateway so a
-      // follow-up that has already settled can still deliver its answer.
+      // finds nothing. Recover the follow-up's canonical terminal snapshot
+      // directly while staying inside the original consultation deadline.
       if (replayed.length === 0 && !settled) {
-        observePendingFollowupRunIdAbort = observePendingFollowupRunId({
-          client: params.client,
-          runId: params.runId,
-          timeoutMs: params.timeoutMs,
-          isSettled: () => settled,
-          isFollowupObserved: () => chatHandler.getAcceptedFollowupRunId() !== undefined,
-          onFollowupObserved: onFollowupRunIdDiscovered,
-          onError: settleReject,
-        });
+        recoverFollowupReply(followupRunId);
       }
     };
 
@@ -337,11 +399,19 @@ function waitForChatResult(params: {
         return;
       }
       emptyFinalWaitStarted = true;
+      const remainingTimeoutMs = params.timeoutMs - (Date.now() - waitStartedAt);
       void params.client
-        .request<AgentWaitResult>("agent.wait", {
-          runId: params.runId,
-          timeoutMs: params.timeoutMs,
-        })
+        .request<AgentWaitResult>(
+          "agent.wait",
+          {
+            runId: params.runId,
+            timeoutMs: remainingTimeoutMs,
+          },
+          {
+            timeoutMs: remainingTimeoutMs,
+            signal: params.signal,
+          },
+        )
         .then((result) => {
           if (settled) {
             return;
@@ -369,6 +439,8 @@ function waitForChatResult(params: {
               client: params.client,
               runId: params.runId,
               timeoutMs: params.timeoutMs,
+              startedAt: waitStartedAt,
+              signal: params.signal,
               isSettled: () => settled,
               isFollowupObserved: () => chatHandler.getAcceptedFollowupRunId() !== undefined,
               onFollowupObserved: onFollowupRunIdDiscovered,
@@ -418,6 +490,10 @@ function waitForChatResult(params: {
       window.clearTimeout(timer);
       if (emptyFinalFallbackTimer !== undefined) {
         window.clearTimeout(emptyFinalFallbackTimer);
+      }
+      if (followupRecoveryRetryTimer !== undefined) {
+        window.clearTimeout(followupRecoveryRetryTimer);
+        followupRecoveryRetryTimer = undefined;
       }
       observePendingFollowupRunIdAbort();
       params.signal?.removeEventListener("abort", onAbort);

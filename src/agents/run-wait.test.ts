@@ -302,6 +302,20 @@ describe("waitForAgentRun", () => {
     expect(result).toEqual({ status: "pending" });
   });
 
+  it("preserves the queued follow-up runId from agent.wait", async () => {
+    callGatewayMock.mockResolvedValue({
+      status: "pending",
+      followupRunId: "run-followup",
+    });
+
+    const result = await waitForAgentRun({ runId: "run-1", timeoutMs: 500 });
+
+    expect(result).toMatchObject({
+      status: "pending",
+      followupRunId: "run-followup",
+    });
+  });
+
   it("preserves pending error diagnostics on wait timeouts", async () => {
     callGatewayMock.mockResolvedValue({
       status: "timeout",

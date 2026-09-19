@@ -12,12 +12,14 @@ import {
 import { createDeferred } from "../../test/helpers/promise.js";
 import * as configPaths from "../config/paths.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import type { CronJob } from "../cron/types.js";
 import { writeRestartSentinel } from "../infra/restart-sentinel.js";
 import type { PluginHookGatewayContext, PluginHookHandlerMap } from "../plugins/hook-types.js";
 import { registerPluginHttpRoute } from "../plugins/http-registry.js";
 import { createPluginMetadataSnapshotFixture } from "../plugins/plugin-metadata.test-support.js";
 import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
 import { getPluginRuntimeGatewayRequestScope } from "../plugins/runtime/gateway-request-scope.js";
+import type { PluginServiceCronHost } from "../plugins/service-cron.js";
 import type { PluginServicesHandle } from "../plugins/services.js";
 import type { OpenClawPluginServiceContext } from "../plugins/types.js";
 import {
@@ -454,6 +456,44 @@ function firstGatewayStartCall(
     throw new Error("gateway_start was not invoked");
   }
   return call as [PluginHookGatewayStartEvent, PluginHookGatewayContext];
+}
+
+function createPluginCronJob(id: string, wakeMode: "now" | "next-heartbeat" = "now"): CronJob {
+  return {
+    id,
+    name: "Gateway cron job",
+    enabled: true,
+    createdAtMs: 1,
+    updatedAtMs: 1,
+    schedule: { kind: "every", everyMs: 60_000 },
+    sessionTarget: "main",
+    wakeMode,
+    payload: { kind: "systemEvent", text: "test" },
+    state: {},
+  };
+}
+
+function createPluginCronHost() {
+  const list = vi.fn<PluginServiceCronHost["list"]>(async () => []);
+  const add = vi.fn<PluginServiceCronHost["add"]>(async () => createPluginCronJob("job-1"));
+  const update = vi.fn<PluginServiceCronHost["update"]>(async (id, patch) =>
+    createPluginCronJob(id, patch.wakeMode ?? "now"),
+  );
+  const remove = vi.fn<PluginServiceCronHost["remove"]>(async () => ({ ok: true, removed: true }));
+  const removeStaleJobFamily = vi.fn<PluginServiceCronHost["removeStaleJobFamily"]>(async () => 0);
+  return { list, add, update, remove, removeStaleJobFamily };
+}
+
+function getGatewayCronService(ctx: PluginHookGatewayContext) {
+  const getCron = ctx.getCron;
+  if (!getCron) {
+    throw new Error("gateway_start context did not expose getCron");
+  }
+  const service = getCron();
+  if (!service) {
+    throw new Error("gateway_start context did not expose a cron service");
+  }
+  return service;
 }
 
 describe("startGatewayPostAttachRuntime", () => {
@@ -4420,20 +4460,13 @@ describe("startGatewayPostAttachRuntime", () => {
     }
   });
 
-  it("passes typed gateway_start context with config, workspace dir, and a live cron getter", async () => {
+  it("does not expose stale deps cron through gateway_start context", async () => {
     const runGatewayStart = vi.fn<
       (event: PluginHookGatewayStartEvent, ctx: PluginHookGatewayContext) => Promise<void>
     >(async () => {});
     const hookRunner = {
       hasHooks: vi.fn((hookName: string) => hookName === "gateway_start"),
       runGatewayStart,
-    };
-    const initialCron = {
-      list: vi.fn(),
-      add: vi.fn(),
-      update: vi.fn(),
-      remove: vi.fn(),
-      removeStaleJobFamily: vi.fn(),
     };
     const params = createPostAttachParams({
       gatewayPluginConfigAtStart: {
@@ -4444,7 +4477,7 @@ describe("startGatewayPostAttachRuntime", () => {
         ...createPostAttachParams().pluginRegistry,
         typedHooks: [{ hookName: "gateway_start" }],
       } as never,
-      deps: { cron: initialCron } as never,
+      deps: {},
     });
 
     await startGatewayPostAttachRuntime(
@@ -4467,17 +4500,17 @@ describe("startGatewayPostAttachRuntime", () => {
     if (!getCron) {
       throw new Error("gateway_start context did not expose getCron");
     }
-    expect(getCron()).toBe(initialCron);
+    expect(getCron()).toBeUndefined();
 
-    const reloadedCron = {
+    const staleCron = {
       list: vi.fn(),
       add: vi.fn(),
       update: vi.fn(),
       remove: vi.fn(),
       removeStaleJobFamily: vi.fn(),
     };
-    params.deps.cron = reloadedCron as never;
-    expect(getCron()).toBe(reloadedCron);
+    params.deps.cron = staleCron;
+    expect(getCron()).toBeUndefined();
   });
 
   it("does not resolve the global hook runner when no gateway_start hooks are registered", async () => {
@@ -4493,7 +4526,7 @@ describe("startGatewayPostAttachRuntime", () => {
     expect(getGlobalHookRunner).not.toHaveBeenCalled();
   });
 
-  it("resolves gateway_start cron from the live runtime getter before deps fallback", async () => {
+  it("adapts live cron through a normalized plugin service with scheduler-generation fencing", async () => {
     const runGatewayStart = vi.fn<
       (event: PluginHookGatewayStartEvent, ctx: PluginHookGatewayContext) => Promise<void>
     >(async () => {});
@@ -4501,30 +4534,17 @@ describe("startGatewayPostAttachRuntime", () => {
       hasHooks: vi.fn((hookName: string) => hookName === "gateway_start"),
       runGatewayStart,
     };
-    const depsCron = {
-      list: vi.fn(),
-      add: vi.fn(),
-      update: vi.fn(),
-      remove: vi.fn(),
-      removeStaleJobFamily: vi.fn(),
-    };
-    const liveCron = {
-      list: vi.fn(),
-      add: vi.fn(),
-      update: vi.fn(),
-      remove: vi.fn(),
-      removeStaleJobFamily: vi.fn(),
-    };
-    const reloadedCron = {
-      list: vi.fn(),
-      add: vi.fn(),
-      update: vi.fn(),
-      remove: vi.fn(),
-      removeStaleJobFamily: vi.fn(),
-    };
-    let currentLiveCron = liveCron;
+    const listEntered = createDeferred();
+    const releaseList = createDeferred();
+    const liveCron = createPluginCronHost();
+    liveCron.list.mockImplementation(async () => {
+      listEntered.resolve();
+      await releaseList.promise;
+      return [];
+    });
+    const reloadedCron = createPluginCronHost();
+    let currentLiveCron: PluginServiceCronHost = liveCron;
     const params = createPostAttachParams({
-      deps: { cron: depsCron } as never,
       getCronService: () => currentLiveCron,
       pluginRegistry: {
         ...createPostAttachParams().pluginRegistry,
@@ -4544,14 +4564,112 @@ describe("startGatewayPostAttachRuntime", () => {
     });
 
     const [, ctx] = firstGatewayStartCall(runGatewayStart);
-    if (!ctx?.getCron) {
-      throw new Error("gateway_start context did not expose getCron");
-    }
-    expect(ctx.getCron()).toBe(liveCron);
+    const service = getGatewayCronService(ctx);
+    expect(service).not.toBe(liveCron);
+    expect(getGatewayCronService(ctx)).toBe(service);
 
-    params.deps.cron = depsCron as never;
+    const createInput = {
+      declarationKey: "test-plugin:gateway-normalize",
+      name: "Gateway normalization",
+      description: "Normalize before delegating to the scheduler",
+      enabled: true,
+      schedule: { kind: "cron", expr: "0 2 * * *" },
+      sessionTarget: "main",
+      wakeMode: "now",
+      payload: { kind: "systemEvent", text: "normalize" },
+    };
+    await service.add(createInput);
+    const addCall = liveCron.add.mock.calls[0] as [unknown, unknown];
+    expect(addCall[0]).not.toBe(createInput);
+    expect(addCall[0]).toMatchObject(createInput);
+    expect(addCall[0]).not.toHaveProperty("delivery");
+    expect(addCall[1]).toEqual({ commitGuard: expect.any(Function) });
+
+    const patch = { wakeMode: "  NOW  " };
+    await service.update("job-1", patch);
+    const updateCall = liveCron.update.mock.calls[0] as [unknown, unknown];
+    expect(updateCall[0]).toBe("job-1");
+    expect(updateCall[1]).not.toBe(patch);
+    expect(updateCall[1]).toMatchObject({ wakeMode: "now" });
+
+    const staleRead = service.list();
+    await listEntered.promise;
     currentLiveCron = reloadedCron;
-    expect(ctx.getCron()).toBe(reloadedCron);
+    const successor = getGatewayCronService(ctx);
+    expect(successor).not.toBe(service);
+    releaseList.resolve();
+    await expect(staleRead).rejects.toThrow("Plugin service cron scheduler was replaced");
+    await expect(successor.list()).resolves.toEqual([]);
+    expect(reloadedCron.list).toHaveBeenCalledOnce();
+  });
+
+  it("revokes the gateway_start cron adapter on close, runtime replacement, and sidecar stop", async () => {
+    const runGatewayStart = vi.fn<
+      (event: PluginHookGatewayStartEvent, ctx: PluginHookGatewayContext) => Promise<void>
+    >(async () => {});
+    const hookRunner = {
+      hasHooks: vi.fn((hookName: string) => hookName === "gateway_start"),
+      runGatewayStart,
+    };
+    let closing = false;
+    let runtimeCurrent = true;
+    const pluginRuntimeClaim = {
+      isCurrent: () => runtimeCurrent,
+      waitForUnblocked: async () => true,
+      publish: (publication: () => void) => {
+        if (!runtimeCurrent) {
+          return false;
+        }
+        publication();
+        return true;
+      },
+    };
+    const liveCron = createPluginCronHost();
+    const params = createPostAttachParams({
+      getCronService: () => liveCron,
+      isClosing: () => closing,
+      pluginRuntimeClaim,
+      pluginRegistry: {
+        ...createPostAttachParams().pluginRegistry,
+        typedHooks: [{ hookName: "gateway_start" }],
+      } as never,
+    });
+
+    await startGatewayPostAttachRuntime(
+      params,
+      createPostAttachRuntimeDeps({
+        getGlobalHookRunner: vi.fn(async () => hookRunner as never),
+      }),
+    );
+
+    await waitForGatewayTestState(() => {
+      expect(runGatewayStart).toHaveBeenCalledTimes(1);
+    });
+
+    const [, ctx] = firstGatewayStartCall(runGatewayStart);
+
+    closing = true;
+    expect(() => getGatewayCronService(ctx)).toThrow("Plugin service cron scheduler is stopping");
+    closing = false;
+    runtimeCurrent = false;
+    expect(() => getGatewayCronService(ctx)).toThrow("Plugin service cron scheduler is stopping");
+
+    runtimeCurrent = true;
+    let sidecarRevoked = false;
+    for (const sidecar of publishedGatewayLifetimeSidecars) {
+      await sidecar.stop();
+      transferBeforeStop(sidecar);
+      try {
+        getGatewayCronService(ctx);
+      } catch {
+        sidecarRevoked = true;
+        break;
+      }
+    }
+    expect(sidecarRevoked).toBe(true);
+    expect(() => getGatewayCronService(ctx)).toThrow(
+      "gateway_start hook cron scheduler is no longer active",
+    );
   });
 });
 

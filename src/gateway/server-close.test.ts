@@ -538,7 +538,8 @@ describe("createGatewayCloseHandler", () => {
   });
 
   it("completes a clean shutdown with a ShutdownResult", async () => {
-    const deps = createGatewayCloseTestDeps();
+    const retiredFollowupRunIds = new Map([["run-followup", "run-retired"]]);
+    const deps = createGatewayCloseTestDeps({ retiredFollowupRunIds });
     const close = createGatewayCloseHandler(deps);
 
     const result = await close({ reason: "test" });
@@ -549,6 +550,7 @@ describe("createGatewayCloseHandler", () => {
     expect(deps.heartbeatRunner.stop).toHaveBeenCalledTimes(1);
     expect(deps.stopMediaCleanup).toHaveBeenCalledTimes(1);
     expect(deps.chatRunState.clear).toHaveBeenCalledTimes(1);
+    expect(deps.retiredFollowupRunIds.size).toBe(0);
   });
 
   it("waits for in-flight media cleanup before shutdown completes", async () => {

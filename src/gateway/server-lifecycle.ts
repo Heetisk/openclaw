@@ -242,7 +242,6 @@ export async function prepareGatewayLifecycle(params: {
     unavailableGatewayMethods,
     runtimeState,
     activeTaskCount,
-    deps,
   });
   runtimeState.controlUiSessionPullRequests = createControlUiSessionPullRequestSubscriptions({
     broadcastToConnIds,
@@ -254,7 +253,6 @@ export async function prepareGatewayLifecycle(params: {
     incrementPresenceVersion,
     getHealthVersion,
   });
-  deps.cron = runtimeState.cronState.cron;
   const pluginHostServices = {
     get cron() {
       return runtimeState.cronState.cron;

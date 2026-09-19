@@ -18,7 +18,6 @@ export function createGatewayKernel(params: {
   unavailableGatewayMethods: Set<string>;
   runtimeState: GatewayServerLiveState;
   activeTaskCount: { get: () => number };
-  deps: { cron: unknown };
 }) {
   const {
     pluginRuntimeGeneration,
@@ -26,7 +25,6 @@ export function createGatewayKernel(params: {
     unavailableGatewayMethods,
     runtimeState,
     activeTaskCount,
-    deps,
   } = params;
   return {
     pluginRuntimeGeneration,
@@ -100,7 +98,6 @@ export function createGatewayKernel(params: {
     swapCronState: (next: typeof runtimeState.cronState) => {
       const previous = runtimeState.cronState;
       runtimeState.cronState = next;
-      deps.cron = next.cron;
       return previous;
     },
     setChannelHealthMonitor: (next: typeof runtimeState.channelHealthMonitor) => {

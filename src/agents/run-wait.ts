@@ -68,6 +68,7 @@ type RawAgentWaitResponse = {
   pendingError?: unknown;
   timeoutPhase?: unknown;
   providerStarted?: unknown;
+  followupRunId?: unknown;
   terminalReply?: unknown;
   terminalReceipt?: unknown;
 };
@@ -92,6 +93,7 @@ function normalizeAgentWaitResult(
     pendingError: wait?.pendingError === true ? true : undefined,
     timeoutPhase: normalizeAgentRunTimeoutPhase(wait?.timeoutPhase),
     providerStarted: normalizeProviderStarted(wait?.providerStarted),
+    followupRunId: typeof wait?.followupRunId === "string" ? wait.followupRunId : undefined,
     terminalReply: normalizeAgentRunTerminalReplySnapshot(wait?.terminalReply),
     sourceReplyDelivered:
       receipt?.runId === runId && receipt.sourceReplyDelivered === true ? true : undefined,
