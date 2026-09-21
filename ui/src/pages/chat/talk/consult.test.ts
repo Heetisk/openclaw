@@ -359,10 +359,14 @@ describe("RealtimeTalkSession consult handoff", () => {
     waitResult.resolve({ runId: "run-1", status: "ok" });
     await Promise.resolve();
 
-    expect(request).toHaveBeenCalledWith("agent.wait", {
-      runId: "run-1",
-      timeoutMs: 120_000,
-    });
+    expect(request).toHaveBeenCalledWith(
+      "agent.wait",
+      {
+        runId: "run-1",
+        timeoutMs: 120_000,
+      },
+      expect.objectContaining({ timeoutMs: 120_000 }),
+    );
     expect(submit).toHaveBeenCalledTimes(1);
     expect(submit).toHaveBeenCalledWith("call-1", {
       result: "The source reply still wins.",

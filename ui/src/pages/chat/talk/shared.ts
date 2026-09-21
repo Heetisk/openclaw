@@ -12,6 +12,8 @@ import type { RealtimeVoiceBrowserSession } from "../../../../../src/talk/provid
 import type { TalkEvent } from "../../../../../src/talk/talk-events.js";
 import type { GatewayBrowserClient, GatewayEventFrame } from "../../../api/gateway.ts";
 import { formatUiError } from "../../../lib/format-error.ts";
+import { createChatHandler, type ChatEventDisposition } from "./chat-handler.ts";
+import { observePendingFollowupRunId } from "./followup-observation.ts";
 import type { RealtimeTalkInputController } from "./input.ts";
 
 export type RealtimeTalkStatus = "idle" | "connecting" | "listening" | "thinking" | "error";
@@ -182,16 +184,8 @@ function resolveRealtimeTalkEventSessionId(
   return `${ctx.sessionKey}:${session.provider}:${session.transport}`;
 }
 
-type ChatPayload = {
-  runId?: string;
-  stream?: string;
-  state?: string;
-  errorMessage?: string;
-  data?: unknown;
-  message?: unknown;
-};
-
-type AgentWaitResult = {
+/** Result of an `agent.wait` Gateway request. */
+export type AgentWaitResult = {
   status?: string;
   error?: string;
   stopReason?: string;
@@ -202,9 +196,17 @@ type AgentWaitResult = {
   aborted?: boolean;
   livenessState?: string;
   yielded?: boolean;
+  followupRunId?: string;
+  terminalReply?: {
+    disposition?: string;
+    text?: string;
+  };
+  sourceReplyDelivered?: true;
 };
 
 const EMPTY_FINAL_FALLBACK_GRACE_MS = 500;
+const EMPTY_FINAL_FALLBACK_TEXT = "OpenClaw finished with no text.";
+const FOLLOWUP_RECOVERY_RETRY_INTERVAL_MS = 2000;
 
 function extractTextFromMessage(message: unknown): string {
   if (!message || typeof message !== "object") {
@@ -235,6 +237,10 @@ function getTerminalAgentWaitError(result: AgentWaitResult | undefined): Error |
   if (result.status === "error") {
     return new Error(message || "OpenClaw tool call failed");
   }
+  // pending means the turn is queued/deferred — not terminal, so keep waiting.
+  if (result.status === "pending") {
+    return undefined;
+  }
   if (result.status !== "timeout" || result.pendingError) {
     return undefined;
   }
@@ -244,7 +250,6 @@ function getTerminalAgentWaitError(result: AgentWaitResult | undefined): Error |
   const hasTerminalTimeoutMetadata =
     result.endedAt !== undefined ||
     message !== undefined ||
-    result.aborted === true ||
     (livenessState !== undefined && livenessState.length > 0) ||
     result.yielded === true ||
     (stopReason !== undefined && stopReason.length > 0) ||
@@ -270,17 +275,14 @@ function waitForChatResult(params: {
       reject(new DOMException("OpenClaw tool call aborted", "AbortError"));
       return;
     }
-    const timer = window.setTimeout(() => {
-      settleReject(new Error("OpenClaw tool call timed out"));
-    }, params.timeoutMs);
     let settled = false;
     let emptyFinalWaitStarted = false;
     let emptyFinalFallbackTimer: number | undefined;
-    const onAbort = () => {
-      settleReject(new DOMException("OpenClaw tool call aborted", "AbortError"));
-    };
-    params.signal?.addEventListener("abort", onAbort, { once: true });
-    let unsubscribe: () => void = () => undefined;
+    let followupRecoveryStarted = false;
+    let followupRecoveryRetryTimer: number | undefined;
+    let observePendingFollowupRunIdAbort = () => {};
+    const waitStartedAt = Date.now();
+
     const settleResolve = (value: string) => {
       if (settled) {
         return;
@@ -297,16 +299,138 @@ function waitForChatResult(params: {
       cleanup();
       reject(error);
     };
+
+    const chatHandler = createChatHandler({
+      runId: params.runId,
+      emitTalkEvent: params.emitTalkEvent,
+      extractTextFromMessage,
+    });
+
+    const applyDisposition = (d: ChatEventDisposition) => {
+      if (settled) {
+        return;
+      }
+      if (d.type === "terminal") {
+        settleResolve(d.text ?? EMPTY_FINAL_FALLBACK_TEXT);
+      } else if (d.type === "empty_final_fallback") {
+        if (chatHandler.getAcceptedFollowupRunId() === undefined) {
+          waitForEmptyFinalFallback();
+        } else {
+          emptyFinalFallbackTimer = window.setTimeout(() => {
+            settleResolve(EMPTY_FINAL_FALLBACK_TEXT);
+          }, EMPTY_FINAL_FALLBACK_GRACE_MS);
+        }
+      } else if (d.type === "aborted") {
+        settleReject(
+          new DOMException(d.errorMessage ?? "OpenClaw tool call aborted", "AbortError"),
+        );
+      } else if (d.type === "errored") {
+        settleReject(new Error(d.errorMessage ?? "OpenClaw tool call failed"));
+      }
+    };
+
+    const requestFollowupReply = (followupRunId: string) => {
+      const remainingTimeoutMs = params.timeoutMs - (Date.now() - waitStartedAt);
+      if (remainingTimeoutMs <= 0) {
+        settleReject(new Error("OpenClaw tool call timed out"));
+        return;
+      }
+      void params.client
+        .request<AgentWaitResult>(
+          "agent.wait",
+          {
+            runId: followupRunId,
+            timeoutMs: remainingTimeoutMs,
+          },
+          {
+            signal: params.signal,
+          },
+        )
+        .then((result) => {
+          if (settled) {
+            return;
+          }
+          const waitError = getTerminalAgentWaitError(result);
+          if (waitError) {
+            settleReject(waitError);
+            return;
+          }
+          if (result?.status === "timeout") {
+            settleReject(new Error(result.error?.trim() || "OpenClaw tool call timed out"));
+            return;
+          }
+          if (result?.terminalReply?.disposition === "visible") {
+            settleResolve(result.terminalReply.text ?? EMPTY_FINAL_FALLBACK_TEXT);
+            return;
+          }
+          if (result?.status === "pending") {
+            const retryRemainingTimeoutMs = params.timeoutMs - (Date.now() - waitStartedAt);
+            if (retryRemainingTimeoutMs <= 0) {
+              settleReject(new Error("OpenClaw tool call timed out"));
+              return;
+            }
+            followupRecoveryRetryTimer = window.setTimeout(
+              () => {
+                followupRecoveryRetryTimer = undefined;
+                requestFollowupReply(followupRunId);
+              },
+              Math.min(FOLLOWUP_RECOVERY_RETRY_INTERVAL_MS, retryRemainingTimeoutMs),
+            );
+            return;
+          }
+          emptyFinalFallbackTimer = window.setTimeout(() => {
+            settleResolve(EMPTY_FINAL_FALLBACK_TEXT);
+          }, EMPTY_FINAL_FALLBACK_GRACE_MS);
+        })
+        .catch((error: unknown) => {
+          settleReject(error instanceof Error ? error : new Error(String(error)));
+        });
+    };
+
+    const recoverFollowupReply = (followupRunId: string) => {
+      if (followupRecoveryStarted || settled) {
+        return;
+      }
+      followupRecoveryStarted = true;
+      requestFollowupReply(followupRunId);
+    };
+
+    /** Set the discovered follow-up runId on the handler and replay any
+     * buffered events that arrived before discovery, recovering terminal
+     * results (final, aborted, error) that would otherwise be lost. */
+    const onFollowupRunIdDiscovered = (followupRunId: string) => {
+      chatHandler.setAcceptedFollowupRunId(followupRunId);
+      const replayed = chatHandler.replayBufferedFollowupEvents();
+      for (const d of replayed) {
+        applyDisposition(d);
+      }
+      // If the buffer was evicted before discovery (oversized terminal event
+      // dropped, or older events evicted by aggregate pressure), replaying
+      // finds nothing. Recover the follow-up's canonical terminal snapshot
+      // directly while staying inside the original consultation deadline.
+      if (replayed.length === 0 && !settled) {
+        recoverFollowupReply(followupRunId);
+      }
+    };
+
     const waitForEmptyFinalFallback = () => {
       if (emptyFinalWaitStarted) {
         return;
       }
       emptyFinalWaitStarted = true;
+      const remainingTimeoutMs = params.timeoutMs - (Date.now() - waitStartedAt);
       void params.client
-        .request<AgentWaitResult>("agent.wait", {
-          runId: params.runId,
-          timeoutMs: params.timeoutMs,
-        })
+        .request<AgentWaitResult>(
+          "agent.wait",
+          {
+            runId: params.runId,
+            timeoutMs: remainingTimeoutMs,
+          },
+          {
+            timeoutMs: remainingTimeoutMs,
+            signal: params.signal,
+          },
+        )
         .then((result) => {
           if (settled) {
             return;
@@ -319,69 +443,67 @@ function waitForChatResult(params: {
           if (result?.status === "timeout") {
             return;
           }
+          if (result?.status === "pending") {
+            if (result.followupRunId) {
+              onFollowupRunIdDiscovered(result.followupRunId);
+              return;
+            }
+            observePendingFollowupRunIdAbort = observePendingFollowupRunId({
+              client: params.client,
+              runId: params.runId,
+              timeoutMs: params.timeoutMs,
+              startedAt: waitStartedAt,
+              signal: params.signal,
+              isSettled: () => settled,
+              isFollowupObserved: () => chatHandler.getAcceptedFollowupRunId() !== undefined,
+              onFollowupObserved: onFollowupRunIdDiscovered,
+              onError: settleReject,
+            });
+            return;
+          }
+          if (result?.followupRunId) {
+            onFollowupRunIdDiscovered(result.followupRunId);
+            return;
+          }
           emptyFinalFallbackTimer = window.setTimeout(() => {
-            settleResolve("OpenClaw finished with no text.");
+            settleResolve(EMPTY_FINAL_FALLBACK_TEXT);
           }, EMPTY_FINAL_FALLBACK_GRACE_MS);
         })
         .catch((error: unknown) => {
           settleReject(error instanceof Error ? error : new Error(String(error)));
         });
     };
+
+    const timer = window.setTimeout(() => {
+      settleReject(new Error("OpenClaw tool call timed out"));
+    }, params.timeoutMs);
+
+    const onAbort = () => {
+      settleReject(new DOMException("OpenClaw tool call aborted", "AbortError"));
+    };
+    params.signal?.addEventListener("abort", onAbort, { once: true });
+    let unsubscribe: () => void = () => {};
     unsubscribe = params.client.addEventListener((evt: GatewayEventFrame) => {
-      if (evt.event !== "chat") {
-        return;
-      }
-      const payload = evt.payload as ChatPayload | undefined;
-      if (!payload || payload.runId !== params.runId) {
-        return;
-      }
-      emitRealtimeTalkAgentProgress(params.emitTalkEvent, payload);
-      if (payload.state === "final") {
-        const finalText = extractTextFromMessage(payload.message);
-        if (finalText) {
-          settleResolve(finalText);
-          return;
-        }
-        waitForEmptyFinalFallback();
-      } else if (payload.state === "aborted") {
-        settleReject(
-          new DOMException(payload.errorMessage ?? "OpenClaw tool call aborted", "AbortError"),
-        );
-      } else if (payload.state === "error") {
-        settleReject(new Error(payload.errorMessage ?? "OpenClaw tool call failed"));
+      const d = chatHandler.handleEvent(evt);
+      if (d) {
+        applyDisposition(d);
       }
     });
+
     function cleanup() {
       window.clearTimeout(timer);
       if (emptyFinalFallbackTimer !== undefined) {
         window.clearTimeout(emptyFinalFallbackTimer);
       }
+      if (followupRecoveryRetryTimer !== undefined) {
+        window.clearTimeout(followupRecoveryRetryTimer);
+        followupRecoveryRetryTimer = undefined;
+      }
+      observePendingFollowupRunIdAbort();
       params.signal?.removeEventListener("abort", onAbort);
       unsubscribe();
+      chatHandler.cleanup();
     }
-  });
-}
-
-function emitRealtimeTalkAgentProgress(
-  emitTalkEvent: ((input: RealtimeTalkEventInput) => void) | undefined,
-  payload: ChatPayload,
-): void {
-  if (!emitTalkEvent || payload.stream !== "tool") {
-    return;
-  }
-  const data = payload.data && typeof payload.data === "object" ? payload.data : {};
-  const record = data as Record<string, unknown>;
-  const phase = typeof record.phase === "string" ? record.phase : undefined;
-  const name = typeof record.name === "string" ? record.name : undefined;
-  const toolCallId = typeof record.toolCallId === "string" ? record.toolCallId : undefined;
-  emitTalkEvent({
-    type: "tool.progress",
-    callId: toolCallId,
-    payload: {
-      runId: payload.runId,
-      ...(name ? { name } : {}),
-      ...(phase ? { phase } : {}),
-    },
   });
 }
 
