@@ -10,18 +10,15 @@ import { isTruthyEnvValue } from "../infra/env.js";
 import type { GatewayActiveWorkInspectors } from "../infra/gateway-active-work.js";
 import { hasRestartSentinel } from "../infra/restart-sentinel.js";
 import type { createGatewayUpdateCheck } from "../infra/update-startup.js";
-import { createPluginRuntimeCapabilityLease } from "../plugins/capability-lease.js";
 import type { getGlobalHookRunner } from "../plugins/hook-runner-global.js";
+import type { PluginHookGatewayCronService } from "../plugins/hook-types.js";
 import type { loadOpenClawPlugins } from "../plugins/loader.js";
 import type { PluginManifestRecord } from "../plugins/manifest-registry.js";
 import type { PluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.types.js";
 import { getPluginModuleLoaderStats } from "../plugins/plugin-module-loader-cache.js";
 import type { PluginRegistry } from "../plugins/registry.js";
 import { withPluginRuntimeRegistryScope } from "../plugins/runtime/gateway-request-scope.js";
-import {
-  createPluginServiceCronGetter,
-  type PluginServiceCronHost,
-} from "../plugins/service-cron.js";
+import type { PluginServiceCronHost } from "../plugins/service-cron.js";
 import type { PluginServicesHandle } from "../plugins/services.js";
 import { runWithGatewayIndependentRootWorkAdmission } from "../process/gateway-work-admission.js";
 import { sweepSessionStateWatchNotices } from "../sessions/session-state-events.js";
