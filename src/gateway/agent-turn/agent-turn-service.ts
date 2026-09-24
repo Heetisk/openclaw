@@ -667,7 +667,6 @@ export function createAgentTurnService(
     if (queuedBeforeWait) {
       return queuedBeforeWait;
     }
-    const retiredFollowupRunId = getRetiredFollowupRunId();
     const snapshot = await waitForAgentJob({
       runId,
       timeoutMs,
@@ -677,6 +676,7 @@ export function createAgentTurnService(
     if (queuedAfterWait) {
       return queuedAfterWait;
     }
+    const retiredFollowupRunId = getRetiredFollowupRunId();
     if (!snapshot) {
       return {
         runId,

@@ -1509,20 +1509,10 @@ export async function startGatewayPostAttachRuntime(
         if (params.isClosing?.()) {
           return;
         }
-        const cronLease = params.getCronService
-          ? createPluginRuntimeCapabilityLease("gateway_start hook")
-          : undefined;
-        const getCron = cronLease
-          ? createPluginServiceCronGetter({
-              getCron: params.getCronService!,
-              lease: cronLease,
-              isStopping: () =>
-                params.isClosing?.() === true || params.pluginRuntimeClaim?.isCurrent() === false,
-            })
-          : () => undefined;
-        if (cronLease) {
-          params.onGatewayLifetimeSidecars?.([{ stop: () => cronLease.revoke() }]);
-        }
+        const getCron = () =>
+          (params.getCronService?.() ?? params.deps.cron) as
+            | PluginHookGatewayCronService
+            | undefined;
         await runWithGatewayIndependentRootWorkAdmission(
           async () => {
             if (params.isClosing?.()) {
