@@ -4460,7 +4460,7 @@ describe("startGatewayPostAttachRuntime", () => {
     }
   });
 
-  it("does not expose stale deps cron through gateway_start context", async () => {
+  it("exposes deps cron through gateway_start context as a fallback", async () => {
     const runGatewayStart = vi.fn<
       (event: PluginHookGatewayStartEvent, ctx: PluginHookGatewayContext) => Promise<void>
     >(async () => {});
@@ -4502,15 +4502,15 @@ describe("startGatewayPostAttachRuntime", () => {
     }
     expect(getCron()).toBeUndefined();
 
-    const staleCron = {
+    const fallbackCron = {
       list: vi.fn(),
       add: vi.fn(),
       update: vi.fn(),
       remove: vi.fn(),
       removeStaleJobFamily: vi.fn(),
     };
-    params.deps.cron = staleCron;
-    expect(getCron()).toBeUndefined();
+    params.deps.cron = fallbackCron;
+    expect(getCron()).toBe(fallbackCron);
   });
 
   it("does not resolve the global hook runner when no gateway_start hooks are registered", async () => {
