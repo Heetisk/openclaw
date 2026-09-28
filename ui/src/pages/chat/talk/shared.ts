@@ -404,21 +404,8 @@ function waitForChatResult(params: {
       for (const d of replayed) {
         applyDisposition(d);
       }
-      // If the buffer was evicted before discovery (oversized terminal event
-      // dropped, or older events evicted by aggregate pressure), replaying
-      // finds nothing and the consultation would otherwise wait until its
-      // 120-second timeout. Issue one recovery poll against the Gateway so a
-      // follow-up that has already settled can still deliver its answer.
       if (replayed.length === 0 && !settled) {
-        observePendingFollowupRunIdAbort = observePendingFollowupRunId({
-          client: params.client,
-          runId: params.runId,
-          timeoutMs: params.timeoutMs,
-          isSettled: () => settled,
-          isFollowupObserved: () => chatHandler.getAcceptedFollowupRunId() !== undefined,
-          onFollowupObserved: onFollowupRunIdDiscovered,
-          onError: settleReject,
-        });
+        recoverFollowupReply(followupRunId);
       }
     };
 
