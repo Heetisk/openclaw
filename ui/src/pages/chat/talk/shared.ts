@@ -406,10 +406,19 @@ function waitForChatResult(params: {
       }
       // If the buffer was evicted before discovery (oversized terminal event
       // dropped, or older events evicted by aggregate pressure), replaying
-      // finds nothing. Recover the follow-up's canonical terminal snapshot
-      // directly while staying inside the original consultation deadline.
+      // finds nothing and the consultation would otherwise wait until its
+      // 120-second timeout. Issue one recovery poll against the Gateway so a
+      // follow-up that has already settled can still deliver its answer.
       if (replayed.length === 0 && !settled) {
-        recoverFollowupReply(followupRunId);
+        observePendingFollowupRunIdAbort = observePendingFollowupRunId({
+          client: params.client,
+          runId: params.runId,
+          timeoutMs: params.timeoutMs,
+          isSettled: () => settled,
+          isFollowupObserved: () => chatHandler.getAcceptedFollowupRunId() !== undefined,
+          onFollowupObserved: onFollowupRunIdDiscovered,
+          onError: settleReject,
+        });
       }
     };
 
@@ -461,6 +470,10 @@ function waitForChatResult(params: {
             });
             return;
           }
+          // A terminal (ok) response may carry a follow-up runId when the
+          // follow-up has already settled before this first wait resolved.
+          // Consume it so buffered events for the follow-up can be replayed
+          // instead of discarding the answer behind the empty fallback.
           if (result?.followupRunId) {
             onFollowupRunIdDiscovered(result.followupRunId);
             return;
