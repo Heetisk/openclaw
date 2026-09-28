@@ -17,4 +17,5 @@ export type AgentWaitResult = {
   providerStarted?: boolean;
   terminalReply?: AgentRunTerminalReplySnapshot;
   sourceReplyDelivered?: true;
+  followupRunId?: string;
 };
