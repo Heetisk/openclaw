@@ -348,7 +348,10 @@ describe("RealtimeTalkSession consult handoff", () => {
         };
       });
       const submit = vi.fn();
+      const controller = new AbortController();
 
+      // Abort after advancing timers so the outer 120s timer doesn't
+      // fire as an unhandled rejection after the test completes.
       const promise = submitRealtimeTalkConsult({
         ctx: {
           client: { request, addEventListener },
@@ -358,6 +361,7 @@ describe("RealtimeTalkSession consult handoff", () => {
         callId: "call-1",
         args: { question: "Check status" },
         submit,
+        signal: controller.signal,
       });
 
       // Advance past both the empty-final chat event and the 500 ms
@@ -366,6 +370,13 @@ describe("RealtimeTalkSession consult handoff", () => {
       await vi.advanceTimersByTimeAsync(1);
       await vi.advanceTimersByTimeAsync(500);
       expect(submit).not.toHaveBeenCalled();
+
+      controller.abort();
+      try {
+        await promise;
+      } catch {
+        // expected: bare timeout rejects after abort
+      }
     } finally {
       vi.useRealTimers();
     }
