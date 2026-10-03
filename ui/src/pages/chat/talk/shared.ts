@@ -215,11 +215,7 @@ function extractTextFromMessage(message: unknown): string {
 
 function getTerminalAgentWaitError(result: AgentWaitResult | undefined): Error | undefined {
   if (!result) {
-    // Wait adapter returned null: the Gateway work scope closed before
-    // a result was available (lifecycle reset, draining). This is an
-    // interrupted observation, not a completed run — surface it as an
-    // error rather than falling through to the empty-final success.
-    return new Error("OpenClaw tool call was interrupted");
+    return undefined;
   }
   const message = result.error?.trim();
   if (result.status === "error") {
@@ -304,6 +300,9 @@ function waitForChatResult(params: {
           const waitError = getTerminalAgentWaitError(result);
           if (waitError) {
             settleReject(waitError);
+            return;
+          }
+          if (result?.status === "timeout") {
             return;
           }
           emptyFinalFallbackTimer = window.setTimeout(() => {

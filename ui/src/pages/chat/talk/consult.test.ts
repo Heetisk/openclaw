@@ -310,7 +310,7 @@ describe("RealtimeTalkSession consult handoff", () => {
     expect(submit).toHaveBeenCalledWith("call-1", { result: "Right run." });
   });
 
-  it("submits the empty-final fallback when agent.wait times out without terminal metadata", async () => {
+  it("does not falsely complete the consult when agent.wait returns a nonterminal bare timeout", async () => {
     vi.useFakeTimers();
     try {
       let listener: ((event: { event: string; payload?: unknown }) => void) | undefined;
@@ -360,15 +360,12 @@ describe("RealtimeTalkSession consult handoff", () => {
         submit,
       });
 
-      // Advance past the empty-final chat event (scheduled at t=0).
+      // Advance past both the empty-final chat event and the 500 ms
+      // fallback grace period. A bare timeout must NOT schedule the
+      // fallback, so submit should not be called with success.
       await vi.advanceTimersByTimeAsync(1);
-      // Advance past the 500 ms empty-final fallback grace period.
       await vi.advanceTimersByTimeAsync(500);
-      await promise;
-
-      expect(submit).toHaveBeenCalledWith("call-1", {
-        result: "OpenClaw finished with no text.",
-      });
+      expect(submit).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
