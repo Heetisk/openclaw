@@ -1,6 +1,5 @@
 import { asOptionalObjectRecord } from "@openclaw/normalization-core/record-coerce";
 import type { TalkClientToolCallResult } from "../../../../../packages/gateway-protocol/src/schema/channels.js";
-import type { AgentWaitResult as GatewayAgentWaitResult } from "../../../../../src/agents/run-wait.types.js";
 import { REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME } from "../../../../../src/talk/agent-consult-tool.js";
 import {
   buildRealtimeVoiceAgentCancelProviderResult,
@@ -181,10 +180,17 @@ type ChatPayload = {
   message?: unknown;
 };
 
-type AgentWaitResult = Omit<Partial<GatewayAgentWaitResult>, "status" | "timeoutPhase"> & {
+type AgentWaitResult = {
   status?: string;
+  error?: string;
+  stopReason?: string;
+  endedAt?: number;
+  pendingError?: boolean;
   timeoutPhase?: string;
+  providerStarted?: boolean;
   aborted?: boolean;
+  livenessState?: string;
+  yielded?: boolean;
 };
 
 const EMPTY_FINAL_FALLBACK_GRACE_MS = 500;
@@ -209,7 +215,11 @@ function extractTextFromMessage(message: unknown): string {
 
 function getTerminalAgentWaitError(result: AgentWaitResult | undefined): Error | undefined {
   if (!result) {
-    return undefined;
+    // Wait adapter returned null: the Gateway work scope closed before
+    // a result was available (lifecycle reset, draining). This is an
+    // interrupted observation, not a completed run — surface it as an
+    // error rather than falling through to the empty-final success.
+    return new Error("OpenClaw tool call was interrupted");
   }
   const message = result.error?.trim();
   if (result.status === "error") {
@@ -223,7 +233,6 @@ function getTerminalAgentWaitError(result: AgentWaitResult | undefined): Error |
   const livenessState = result.livenessState?.trim();
   const hasTerminalTimeoutMetadata =
     result.endedAt !== undefined ||
-    message !== undefined ||
     result.aborted === true ||
     (livenessState !== undefined && livenessState.length > 0) ||
     result.yielded === true ||
@@ -231,6 +240,7 @@ function getTerminalAgentWaitError(result: AgentWaitResult | undefined): Error |
     timeoutPhase === "preflight" ||
     timeoutPhase === "provider" ||
     timeoutPhase === "post_turn" ||
+    timeoutPhase === "gateway_draining" ||
     result.providerStarted === true;
   if (hasTerminalTimeoutMetadata) {
     return new Error(message || "OpenClaw tool call timed out");
@@ -294,9 +304,6 @@ function waitForChatResult(params: {
           const waitError = getTerminalAgentWaitError(result);
           if (waitError) {
             settleReject(waitError);
-            return;
-          }
-          if (result?.status === "timeout") {
             return;
           }
           emptyFinalFallbackTimer = window.setTimeout(() => {
