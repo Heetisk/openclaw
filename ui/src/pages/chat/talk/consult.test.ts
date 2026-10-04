@@ -709,6 +709,14 @@ describe("RealtimeTalkSession consult handoff", () => {
       },
       expected: "OpenClaw tool call timed out",
     },
+    {
+      waitResult: {
+        runId: "run-1",
+        status: "timeout",
+        timeoutPhase: "gateway_draining",
+      },
+      expected: "OpenClaw tool call timed out",
+    },
   ])("submits $expected from terminal empty-final waits", async ({ waitResult, expected }) => {
     let listener: ((event: { event: string; payload?: unknown }) => void) | undefined;
     const request = vi.fn(async (method: string, _params?: unknown) => {
