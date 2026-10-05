@@ -1,5 +1,4 @@
 import { asOptionalObjectRecord } from "@openclaw/normalization-core/record-coerce";
-import type { AgentWaitResult } from "../../../../../packages/gateway-protocol/src/schema/agent-run.js";
 import type { TalkClientToolCallResult } from "../../../../../packages/gateway-protocol/src/schema/channels.js";
 import { REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME } from "../../../../../src/talk/agent-consult-tool.js";
 import {
