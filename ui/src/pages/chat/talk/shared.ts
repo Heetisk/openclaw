@@ -1,6 +1,19 @@
 import { asOptionalObjectRecord } from "@openclaw/normalization-core/record-coerce";
 import type { TalkClientToolCallResult } from "../../../../../packages/gateway-protocol/src/schema/channels.js";
 import { REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME } from "../../../../../src/talk/agent-consult-tool.js";
+import {
+  buildRealtimeVoiceAgentCancelProviderResult,
+  buildRealtimeVoiceAgentControlSpeechMessage,
+  parseRealtimeVoiceAgentControlToolArgs,
+  REALTIME_VOICE_AGENT_CONTROL_TOOL_NAME,
+  shouldAutoControlRealtimeVoiceAgentText,
+} from "../../../../../src/talk/agent-run-control-shared.js";
+import type { RealtimeVoiceAgentControlMode } from "../../../../../src/talk/agent-run-control-shared.js";
+import type { RealtimeVoiceBrowserSession } from "../../../../../src/talk/provider-types.js";
+import type { TalkEvent, TalkEventInput } from "../../../../../src/talk/talk-events.js";
+import type { GatewayBrowserClient, GatewayEventFrame } from "../../../api/gateway.ts";
+import { formatUiError } from "../../../lib/format-error.ts";
+import type { RealtimeTalkInputController } from "./input.ts";
 
 /** Agent wait result from the Gateway, used locally to avoid cross-package type dependency. */
 type GatewayAgentWaitResult = {
@@ -15,19 +28,6 @@ type GatewayAgentWaitResult = {
   livenessState?: string;
   yielded?: boolean;
 };
-import {
-  buildRealtimeVoiceAgentCancelProviderResult,
-  buildRealtimeVoiceAgentControlSpeechMessage,
-  parseRealtimeVoiceAgentControlToolArgs,
-  REALTIME_VOICE_AGENT_CONTROL_TOOL_NAME,
-  shouldAutoControlRealtimeVoiceAgentText,
-} from "../../../../../src/talk/agent-run-control-shared.js";
-import type { RealtimeVoiceAgentControlMode } from "../../../../../src/talk/agent-run-control-shared.js";
-import type { RealtimeVoiceBrowserSession } from "../../../../../src/talk/provider-types.js";
-import type { TalkEvent, TalkEventInput } from "../../../../../src/talk/talk-events.js";
-import type { GatewayBrowserClient, GatewayEventFrame } from "../../../api/gateway.ts";
-import { formatUiError } from "../../../lib/format-error.ts";
-import type { RealtimeTalkInputController } from "./input.ts";
 
 export type RealtimeTalkStatus = "idle" | "connecting" | "listening" | "thinking" | "error";
 export type RealtimeTalkEvent = TalkEvent;
