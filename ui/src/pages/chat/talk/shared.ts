@@ -1,4 +1,5 @@
 import { asOptionalObjectRecord } from "@openclaw/normalization-core/record-coerce";
+import type { AgentWaitResult } from "../../../../../packages/gateway-protocol/src/schema/agent-run.js";
 import type { TalkClientToolCallResult } from "../../../../../packages/gateway-protocol/src/schema/channels.js";
 import { REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME } from "../../../../../src/talk/agent-consult-tool.js";
 import {
@@ -180,19 +181,6 @@ type ChatPayload = {
   message?: unknown;
 };
 
-type AgentWaitResult = {
-  status?: string;
-  error?: string;
-  stopReason?: string;
-  endedAt?: number;
-  pendingError?: boolean;
-  timeoutPhase?: string;
-  providerStarted?: boolean;
-  aborted?: boolean;
-  livenessState?: string;
-  yielded?: boolean;
-};
-
 const EMPTY_FINAL_FALLBACK_GRACE_MS = 500;
 
 function extractTextFromMessage(message: unknown): string {
@@ -227,7 +215,12 @@ function getTerminalAgentWaitError(result: AgentWaitResult | undefined): Error |
   const stopReason = result.stopReason?.trim();
   const timeoutPhase = result.timeoutPhase?.trim();
   const livenessState = result.livenessState?.trim();
+  // Error-message presence indicates a terminal timeout: the wait owner resolved
+  // with an error but without a canonical terminal status, so treat it as an
+  // interruption rather than letting the consultation wait for the outer deadline.
+  const hasErrorMessage = message !== undefined && message.length > 0;
   const hasTerminalTimeoutMetadata =
+    hasErrorMessage ||
     result.endedAt !== undefined ||
     result.aborted === true ||
     (livenessState !== undefined && livenessState.length > 0) ||
