@@ -3,7 +3,7 @@ import type { TalkClientToolCallResult } from "../../../../../packages/gateway-p
 import { REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME } from "../../../../../src/talk/agent-consult-tool.js";
 
 /** Agent wait result from the Gateway, used locally to avoid cross-package type dependency. */
-type AgentWaitResult = {
+type GatewayAgentWaitResult = {
   status?: string;
   error?: string;
   stopReason?: string;
@@ -214,7 +214,7 @@ function extractTextFromMessage(message: unknown): string {
   return parts.join("\n\n").trim();
 }
 
-function getTerminalAgentWaitError(result: AgentWaitResult | undefined): Error | undefined {
+function getTerminalAgentWaitError(result: GatewayAgentWaitResult | undefined): Error | undefined {
   if (!result) {
     return undefined;
   }
