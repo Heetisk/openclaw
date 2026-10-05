@@ -295,7 +295,7 @@ function waitForChatResult(params: {
       }
       emptyFinalWaitStarted = true;
       void params.client
-        .request<AgentWaitResult>("agent.wait", {
+        .request<GatewayAgentWaitResult>("agent.wait", {
           runId: params.runId,
           timeoutMs: params.timeoutMs,
         })
