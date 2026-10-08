@@ -1,5 +1,6 @@
 import { asOptionalObjectRecord } from "@openclaw/normalization-core/record-coerce";
 import type { TalkClientToolCallResult } from "../../../../../packages/gateway-protocol/src/schema/channels.js";
+import type { AgentWaitResult as GatewayAgentWaitResult } from "../../../../../src/agents/run-wait.types.js";
 import { REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME } from "../../../../../src/talk/agent-consult-tool.js";
 import {
   buildRealtimeVoiceAgentCancelProviderResult,
@@ -15,18 +16,11 @@ import type { GatewayBrowserClient, GatewayEventFrame } from "../../../api/gatew
 import { formatUiError } from "../../../lib/format-error.ts";
 import type { RealtimeTalkInputController } from "./input.ts";
 
-/** Agent wait result from the Gateway, used locally to avoid cross-package type dependency. */
-type GatewayAgentWaitResult = {
+/** Local projection of GatewayAgentWaitResult with optional status/timeoutPhase and added aborted. */
+type AgentWaitResult = Omit<Partial<GatewayAgentWaitResult>, "status" | "timeoutPhase"> & {
   status?: string;
-  error?: string;
-  stopReason?: string;
-  endedAt?: number;
-  pendingError?: boolean;
-  timeoutPhase?: string;
-  providerStarted?: boolean;
+  timeoutPhase?: string | undefined;
   aborted?: boolean;
-  livenessState?: string;
-  yielded?: boolean;
 };
 
 export type RealtimeTalkStatus = "idle" | "connecting" | "listening" | "thinking" | "error";
@@ -214,7 +208,7 @@ function extractTextFromMessage(message: unknown): string {
   return parts.join("\n\n").trim();
 }
 
-function getTerminalAgentWaitError(result: GatewayAgentWaitResult | undefined): Error | undefined {
+function getTerminalAgentWaitError(result: AgentWaitResult | undefined): Error | undefined {
   if (!result) {
     return undefined;
   }
