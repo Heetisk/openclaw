@@ -10,12 +10,12 @@
 import path from "node:path";
 import { buildAgentSessionKey } from "openclaw/plugin-sdk/routing";
 import { afterEach, describe, expect, it } from "vitest";
-import { startQaBusServer } from "../../../extensions/qa-lab/src/bus-server.js";
-import { createQaBusState } from "../../../extensions/qa-lab/src/bus-state.js";
-import { createQaGatewayChild } from "../../../extensions/qa-lab/src/gateway-child.js";
-import { startQaMockOpenAiServer } from "../../../extensions/qa-lab/src/providers/mock-openai/server.js";
-import { createQaChannelTransport } from "../../../extensions/qa-lab/src/qa-channel-transport.js";
-import { waitForQaTransportCondition } from "../../../extensions/qa-lab/src/qa-transport.js";
+import { startQaBusServer } from "./bus-server.js";
+import { createQaBusState } from "./bus-state.js";
+import { createQaGatewayChild } from "./gateway-child.js";
+import { startQaMockOpenAiServer } from "./providers/mock-openai/server.js";
+import { createQaChannelTransport } from "./qa-channel-transport.js";
+import { waitForQaTransportCondition } from "./qa-transport.js";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../..");
 
