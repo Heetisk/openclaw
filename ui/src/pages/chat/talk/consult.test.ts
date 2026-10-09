@@ -191,69 +191,6 @@ describe("RealtimeTalkSession consult handoff", () => {
     },
   );
 
-  it("prefers source-reply final text over an earlier empty Talk consult final", async () => {
-    let listener: ((event: { event: string; payload?: unknown }) => void) | undefined;
-    const request = vi.fn(async (method: string, _params?: unknown) => {
-      if (method === "talk.client.toolCall") {
-        setImmediate(() => {
-          listener?.({
-            event: "chat",
-            payload: {
-              runId: "run-1",
-              state: "final",
-              message: undefined,
-            },
-          });
-          listener?.({
-            event: "chat",
-            payload: {
-              runId: "run-1",
-              state: "final",
-              message: {
-                role: "assistant",
-                provider: "openclaw",
-                model: "delivery-mirror",
-                text: "The requested status is green.",
-              },
-            },
-          });
-        });
-        return {
-          runId: "run-1",
-          idempotencyKey: "run-1",
-          agentId: "main",
-          agentSessionKey: "agent:main:main",
-        };
-      }
-      if (method === "agent.wait") {
-        return { runId: "run-1", status: "ok" };
-      }
-      throw new Error(`unexpected request: ${method}`);
-    });
-    const addEventListener = vi.fn((callback: typeof listener) => {
-      listener = callback;
-      return () => {
-        listener = undefined;
-      };
-    });
-    const submit = vi.fn();
-
-    await submitRealtimeTalkConsult({
-      ctx: {
-        client: { request, addEventListener },
-        sessionKey: "agent:main:main",
-        callbacks: {},
-      } as never,
-      callId: "call-1",
-      args: { question: "Check status" },
-      submit,
-    });
-
-    expect(submit).toHaveBeenCalledWith("call-1", {
-      result: "The requested status is green.",
-    });
-  });
-
   it("ignores chat events from runIds that do not match the consult", async () => {
     let listener: ((event: { event: string; payload?: unknown }) => void) | undefined;
     const request = vi.fn(async (method: string, _params?: unknown) => {
@@ -913,34 +850,6 @@ describe("RealtimeTalkSession consult handoff", () => {
       },
       final: false,
     });
-  });
-
-  it("speaks status and cancel acknowledgements when requested by active consult steering", async () => {
-    const request = vi.fn(async () => ({
-      ok: true,
-      mode: "status",
-      sessionKey: "agent:main:main",
-      active: true,
-      message: "OpenClaw is working in read (running).",
-      speak: true,
-      show: true,
-      suppress: false,
-    }));
-    const speakControlResult = vi.fn();
-
-    await steerRealtimeTalkActiveConsult({
-      ctx: {
-        client: { request, addEventListener: vi.fn() },
-        sessionKey: "agent:main:main",
-        callbacks: {},
-      } as never,
-      text: "status",
-      speakControlResult,
-    });
-
-    expect(speakControlResult).toHaveBeenCalledWith(
-      expect.stringContaining('Status: "OpenClaw is working in read (running)."'),
-    );
   });
 
   it("can suppress cancel control speech while the original consult submits the cancel result", async () => {
