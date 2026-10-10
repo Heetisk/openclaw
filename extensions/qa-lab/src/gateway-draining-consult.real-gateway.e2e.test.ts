@@ -106,24 +106,48 @@ describe.skipIf(process.platform === "win32")("gateway draining during active Ta
         )
         .toBe(true);
 
-      // Now trigger gateway restart (should emit gateway_draining)
+      // Start a run whose lifecycle will be interrupted, and observe it with the
+      // same agent.wait call the Browser Talk consult listener uses. An in-flight
+      // wait must be retired by the lifecycle reset rather than resolving as if
+      // the run had completed.
+      const turn = (await gateway.call("chat.send", {
+        sessionKey,
+        message: "Hold the consult while the Gateway drains.",
+        idempotencyKey: "gateway-draining-test",
+      })) as { runId: string };
+      expect(typeof turn.runId).toBe("string");
+
+      const drained = gateway
+        .call("agent.wait", { runId: turn.runId, timeoutMs: 120_000 }, { timeoutMs: 130_000 })
+        .then(
+          (result) => ({ ok: true, result }) as const,
+          (error: unknown) => ({ ok: false, error }) as const,
+        );
+
+      // Let the wait reach the observation owner before draining, so the reset
+      // retires a live wait rather than racing its admission. The mock holds the
+      // turn open, so an admitted wait stays pending until the lifecycle resets.
+      await waitForQaTransportCondition(() => undefined, 2_000, 500);
+
       console.log("Triggering gateway restart to emit gateway_draining...");
       await gateway.call("gateway.restart.request", {
         reason: "e2e-gateway-draining-test",
         safe: true,
       });
 
-      // Wait for the restart to complete and logs to appear
-      await waitForQaTransportCondition(
-        () => (gateway.logs().includes("gateway_draining") ? true : undefined),
-        30_000,
-        500,
-      );
-
-      // Check gateway logs for gateway_draining
-      const logs = gateway.logs();
-      console.log("Gateway logs:", logs);
-      expect(logs).toContain("gateway_draining");
+      // The wait owner resolves an interrupted observation as a terminal timeout
+      // tagged gateway_draining (src/gateway/agent-turn/agent-job.ts:710). This is
+      // the wire contract ui/src/pages/chat/talk/shared.ts keys on to reject the
+      // consult instead of falling through to the no-text completion fallback.
+      const observation = await drained;
+      if (!observation.ok) {
+        throw new Error(`agent.wait rejected during draining: ${String(observation.error)}`);
+      }
+      const result = observation.result as { status?: string; timeoutPhase?: string };
+      expect({ status: result.status, timeoutPhase: result.timeoutPhase }).toEqual({
+        status: "timeout",
+        timeoutPhase: "gateway_draining",
+      });
 
       // Verify the mock server received the consult request
       const requests = (await (await fetch(`${mock.baseUrl}/debug/requests`)).json()) as Array<{
