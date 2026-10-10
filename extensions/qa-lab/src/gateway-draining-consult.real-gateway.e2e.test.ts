@@ -1,7 +1,7 @@
 /**
  * Real-Gateway E2E test for the gateway_draining observation contract.
  *
- * Proves the Gateway side of the Browse Talk consult regression: when a Gateway
+ * Proves the Gateway side of the Browser Talk consult regression: when a Gateway
  * lifecycle reset interrupts an in-flight observation of a run that has not
  * settled, `agent.wait` resolves as `{status: "timeout", timeoutPhase:
  * "gateway_draining"}`. That response is what
