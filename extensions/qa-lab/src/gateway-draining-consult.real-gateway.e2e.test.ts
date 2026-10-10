@@ -15,7 +15,6 @@ import { createQaBusState } from "./bus-state.js";
 import { createQaGatewayChild } from "./gateway-child.js";
 import { startQaMockOpenAiServer } from "./providers/mock-openai/server.js";
 import { createQaChannelTransport } from "./qa-channel-transport.js";
-import { waitForQaTransportCondition } from "./qa-transport.js";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../..");
 
@@ -124,10 +123,11 @@ describe.skipIf(process.platform === "win32")("gateway draining during active Ta
           (error: unknown) => ({ ok: false, error }) as const,
         );
 
-      // Let the wait reach the observation owner before draining, so the reset
-      // retires a live wait rather than racing its admission. The mock holds the
-      // turn open, so an admitted wait stays pending until the lifecycle resets.
-      await waitForQaTransportCondition(() => undefined, 2_000, 500);
+      // Give the wait a chance to reach the observation owner before draining, so
+      // the reset retires a live wait rather than racing its admission. The mock
+      // holds the turn open, so an admitted wait stays pending until the reset
+      // retires it; an unadmitted one would instead resolve with a run-not-found
+      // error, which the assertion below reports rather than hiding.
 
       console.log("Triggering gateway restart to emit gateway_draining...");
       await gateway.call("gateway.restart.request", {
