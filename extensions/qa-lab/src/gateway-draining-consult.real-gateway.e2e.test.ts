@@ -1,10 +1,20 @@
 /**
- * Real-gateway E2E test for gateway_draining behavior during Talk consult.
+ * Real-Gateway E2E test for the gateway_draining observation contract.
  *
- * Verifies that when a Gateway lifecycle reset occurs during an active consult:
- * 1. The agent.wait returns timeout with gateway_draining phase
- * 2. The voice transport receives a timeout error (not false "OpenClaw finished with no text")
- * 3. The underlying run is NOT marked as completed
+ * Proves the Gateway side of the Browse Talk consult regression: when a Gateway
+ * lifecycle reset interrupts an in-flight observation of a run that has not
+ * settled, `agent.wait` resolves as `{status: "timeout", timeoutPhase:
+ * "gateway_draining"}`. That response is what
+ * ui/src/pages/chat/talk/shared.ts classifies as terminal, so the consult
+ * rejects instead of falling through to the 500ms no-text completion fallback.
+ *
+ * The run is held on a real `wait` tool call (`qa_restart_wait`) and the
+ * assertion waits for that call to be in flight, so the reset interrupts a live
+ * observation rather than racing a settled turn.
+ *
+ * Scope boundary: this proves the Gateway wait response only. It does not drive
+ * a Browser Talk session, so it does not yet prove the correlated timeout is
+ * submitted through the voice transport; that boundary has no harness here.
  */
 
 import path from "node:path";
@@ -15,6 +25,10 @@ import { createQaBusState } from "./bus-state.js";
 import { createQaGatewayChild } from "./gateway-child.js";
 import { startQaMockOpenAiServer } from "./providers/mock-openai/server.js";
 import { createQaChannelTransport } from "./qa-channel-transport.js";
+import {
+  readRawQaSessionStore,
+  readSessionTranscriptSummary,
+} from "./suite-runtime-agent-session.js";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../..");
 
@@ -57,7 +71,22 @@ describe.skipIf(process.platform === "win32")("gateway draining during active Ta
       controlUiEnabled: false,
       mutateConfig: (cfg) => ({
         ...cfg,
-        tools: { profile: "full", allow: ["talk.client.toolCall"], codeMode: false },
+        plugins: {
+          ...cfg.plugins,
+          slots: { ...cfg.plugins?.slots, memory: "none" },
+          entries: {
+            ...cfg.plugins?.entries,
+            acpx: { enabled: false },
+            "memory-core": { enabled: false },
+          },
+        },
+        tools: {
+          ...cfg.tools,
+          allow: ["talk.client.toolCall", "qa_restart_wait"],
+          // Hold the run on a real wait call so the draining reset interrupts a
+          // pending observation instead of a completed turn.
+          codeMode: { enabled: true, timeoutMs: 10_000 },
+        },
       }),
     });
 
@@ -80,42 +109,41 @@ describe.skipIf(process.platform === "win32")("gateway draining during active Ta
         label: "Gateway draining test",
       });
 
-      // Send an inbound message that triggers a consult (tool call)
-      await transport.sendInbound({
-        accountId: transport.accountId,
-        conversation: { id: "gateway-draining-test", kind: "direct" },
-        senderId: "gateway-draining-test",
-        text: "Run a consult test [consult-test:start]",
-      });
-
-      // Wait for the tool call to be initiated - poll the mock's debug endpoint
-      await expect
-        .poll(
-          async () => {
-            const requests = (await (
-              await fetch(`${mock.baseUrl}/debug/requests`)
-            ).json()) as Array<{ plannedToolName?: string; prompt?: string }>;
-            return requests.some(
-              (r) =>
-                r.plannedToolName === "openclaw_agent_consult" ||
-                r.prompt?.includes("consult-test:start"),
-            );
-          },
-          { timeout: 30_000 },
-        )
-        .toBe(true);
-
-      // Start a run whose lifecycle will be interrupted, and observe it with the
-      // same agent.wait call the Browser Talk consult listener uses. An in-flight
-      // wait must be retired by the lifecycle reset rather than resolving as if
-      // the run had completed.
+      // Start the Code Mode restart-wait fixture. Its hold is a real `wait` tool
+      // call, so the run stays pending until the hold is released. chat.send
+      // returns the runId immediately with the run still in flight.
       const turn = (await gateway.call("chat.send", {
         sessionKey,
-        message: "Hold the consult while the Gateway drains.",
-        idempotencyKey: "gateway-draining-test",
-      })) as { runId: string };
+        message: "Code Mode restart wait QA check. Original prompt marker: CONSULT-DRAINING-TEST.",
+        deliver: false,
+        idempotencyKey: "gateway-draining-consult-e2e",
+      })) as { runId: string; status: string };
+      expect(turn.status).toBe("started");
       expect(typeof turn.runId).toBe("string");
 
+      // Synchronize on the hold before interrupting: the run must be running with
+      // its `wait` tool call still in flight. A run that has already settled would
+      // answer `ok` and prove nothing about the draining classification.
+      await transport.waitForCondition(
+        async () => {
+          const entry = (await readRawQaSessionStore({ gateway }))[sessionKey];
+          if (entry?.status !== "running") {
+            return undefined;
+          }
+          const transcript = await readSessionTranscriptSummary({ gateway }, sessionKey, {
+            includeCodeModeControl: true,
+          });
+          return (transcript.assistantToolCallCounts.wait ?? 0) >
+            (transcript.completedToolCallCounts.wait ?? 0)
+            ? true
+            : undefined;
+        },
+        120_000,
+        25,
+      );
+
+      // Observe the run with the same agent.wait call the Browser Talk consult
+      // listener uses, then interrupt the pending observation.
       const drained = gateway
         .call("agent.wait", { runId: turn.runId, timeoutMs: 120_000 }, { timeoutMs: 130_000 })
         .then(
@@ -123,15 +151,13 @@ describe.skipIf(process.platform === "win32")("gateway draining during active Ta
           (error: unknown) => ({ ok: false, error }) as const,
         );
 
-      // Give the wait a chance to reach the observation owner before draining, so
-      // the reset retires a live wait rather than racing its admission. The mock
-      // holds the turn open, so an admitted wait stays pending until the reset
-      // retires it; an unadmitted one would instead resolve with a run-not-found
-      // error, which the assertion below reports rather than hiding.
+      // The hold keeps the run pending, so an admitted wait stays open until the
+      // reset retires it; an unadmitted one resolves with a run-not-found error,
+      // which the assertion below reports rather than hiding.
 
-      console.log("Triggering gateway restart to emit gateway_draining...");
+      console.log("Triggering gateway restart to interrupt a pending wait...");
       await gateway.call("gateway.restart.request", {
-        reason: "e2e-gateway-draining-test",
+        reason: "e2e-consult-draining-test",
         safe: true,
       });
 
@@ -148,23 +174,6 @@ describe.skipIf(process.platform === "win32")("gateway draining during active Ta
         status: "timeout",
         timeoutPhase: "gateway_draining",
       });
-
-      // Verify the mock server received the consult request
-      const requests = (await (await fetch(`${mock.baseUrl}/debug/requests`)).json()) as Array<{
-        plannedToolName?: string;
-        prompt?: string;
-      }>;
-      console.log(
-        "Mock requests:",
-        requests.map((r) => ({ tool: r.plannedToolName, prompt: r.prompt?.slice(0, 100) })),
-      );
-      expect(
-        requests.some(
-          (r) =>
-            r.plannedToolName === "openclaw_agent_consult" ||
-            r.prompt?.includes("consult-test:start"),
-        ),
-      ).toBe(true);
     } finally {
       await owner.stop();
       await mock.stop();
