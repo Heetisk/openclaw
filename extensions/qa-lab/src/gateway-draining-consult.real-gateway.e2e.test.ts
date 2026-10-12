@@ -165,10 +165,9 @@ describe.skipIf(process.platform === "win32")("gateway draining during active Ta
         );
       const drainedSettled = drained.then(() => true);
       let drainedOutcome: "pending" | "settled" = "pending";
-      drained.then(() => {
+      void drainedSettled.then(() => {
         drainedOutcome = "settled";
       });
-
       // The observation must be admitted and genuinely pending before it is
       // interrupted. A rejected wait (unknown run, session-scoped rejection)
       // settles immediately with an error instead of staying open, so proving
