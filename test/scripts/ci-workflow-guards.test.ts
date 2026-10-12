@@ -34,6 +34,7 @@ import {
   createUiRealGatewayTestShards,
   createUiTestShardGroups,
 } from "../../scripts/lib/ci-node-test-plan.mts";
+import { RELEASE_ONLY_UI_TEST_FILES } from "../../scripts/lib/ci-proof-test-inventory.mts";
 import { createNativeTypeScriptParser } from "../../scripts/lib/native-typescript.mts";
 import { pnpmLockfileDocuments } from "../../scripts/lib/pnpm-lockfile-documents.mjs";
 import { collectRuntimeImportClosure } from "../../scripts/lib/runtime-import-closure.mts";
@@ -5672,7 +5673,16 @@ printf '%s\n' "\${CURL_SUCCESS_IP:-203.0.113.7}"
           .toSorted(),
       );
       if (releaseTier === false) {
-        expect(selectedFiles).toHaveLength(uiE2eRealGatewayTestFiles.length - 12);
+        // Release-only files leave routine plans unless directly edited, and the
+        // desktop transport proof is reserved separately. Derive the remainder
+        // from the release-only inventory so adding a composition cannot rot a
+        // hand-counted literal.
+        const releaseOnlyRealGateway = uiE2eRealGatewayTestFiles.filter((file) =>
+          RELEASE_ONLY_UI_TEST_FILES.has(file),
+        );
+        expect(selectedFiles).toHaveLength(
+          uiE2eRealGatewayTestFiles.length - releaseOnlyRealGateway.length,
+        );
         expect(selectedFiles).not.toContain(
           "ui/src/e2e/cron-duration-save.real-gateway.e2e.test.ts",
         );
